@@ -14,7 +14,7 @@ def main() -> int:
     commands.add_parser("open", help="Abre um novo Input")
     add = commands.add_parser("add", help="Copia arquivos reais para o Pacote")
     add.add_argument("files", nargs="+", type=Path)
-    commands.add_parser("close", help="Fecha, conta e entrega somente n ao Namer")
+    commands.add_parser("close", help="Fecha, conta, executa o Namer e renomeia no Pacote")
     commands.add_parser("status", help="Mostra o estado sem abrir arquivos")
     args = parser.parse_args()
 
@@ -27,7 +27,7 @@ def main() -> int:
         elif args.command == "add":
             print(f"Arquivos recebidos no ciclo: {pacote.add(args.files)}")
         elif args.command == "close":
-            print(f"Input fechado. n={pacote.close()} entregue ao Namer.")
+            print(f"Input fechado. n={pacote.close()}; stems retornados ao Pacote e arquivos renomeados.")
         else:
             print(json.dumps(pacote.status(), ensure_ascii=False))
     except (CacheError, OSError) as exc:
