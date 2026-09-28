@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -97,7 +98,42 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("close")
         self.assertTrue((directory / item["renamed"]).is_file())
         self.assertEqual(json.loads((self.runtime / "BN1_1/Namer/outbox/stems.json").read_text())["stems"], stems)
-        self.assertEqual(json.loads(state_path.read_text())["status"], "NAMED")
+        self.assertEqual(json.loads(state_path.read_text())["status"], "STAGED")
+
+    def test_sorter_uses_hash_registry_and_bbn_preserves_case_and_last_suffix(self):
+        names = ["a.pdf", "b.pdf", "c.PDF", "archive.tar.gz", "plain"]
+        for name in names:
+            (self.base / name).write_bytes(name.encode())
+        self.run_cli("open")
+        self.run_cli("add", *(self.base / name for name in names))
+        self.run_cli("close")
+
+        registry = json.loads((self.runtime / "BN1_1/Sorter/extension_registry.json").read_text())
+        for extension in ["pdf", "PDF", "gz", ""]:
+            digest = hashlib.sha256(extension.encode()).hexdigest()
+            self.assertEqual(registry[digest], extension)
+            partition = json.loads((self.runtime / "BN1_1/Sorter/partitions" / digest / "names.json").read_text())
+            self.assertEqual(partition["idd"], digest)
+            self.assertEqual(len(partition["filenames"]), 2 if extension == "pdf" else 1)
+            folder = self.runtime / "BN1_1/BBN1_1" / (f"by_extension/{extension}" if extension else "no_extension")
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(partition["filenames"]))
+        contents = [p.read_bytes() for p in (self.runtime / "BN1_1/BBN1_1").rglob("*") if p.is_file()]
+        self.assertEqual(sorted(contents), sorted(name.encode() for name in names))
+        self.assertEqual(json.loads((self.runtime / "cycle.json").read_text())["status"], "STAGED")
+
+    def test_sorter_rejects_hash_inconsistency_without_touching_cached_bytes(self):
+        source = self.base / "sample.pdf"
+        source.write_bytes(b"payload")
+        self.run_cli("open")
+        self.run_cli("add", source)
+        self.run_cli("close")
+        registry_path = self.runtime / "BN1_1/Sorter/extension_registry.json"
+        registry = json.loads(registry_path.read_text())
+        registry[hashlib.sha256(b"pdf").hexdigest()] = "other"
+        registry_path.write_text(json.dumps(registry))
+        self.run_cli("close", expected=1)
+        cached = next((self.runtime / "BN1_1/Pacote/files").glob("*/*"))
+        self.assertEqual(cached.read_bytes(), b"payload")
 
 
 if __name__ == "__main__":
