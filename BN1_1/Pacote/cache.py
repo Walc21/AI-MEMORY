@@ -5,12 +5,16 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
+import secrets
 import shutil
 import stat
 import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+from BN1_1.Namer.namer import Namer, NamerError
 
 
 class CacheError(Exception):
@@ -65,7 +69,7 @@ class Pacote:
                 state = json.load(stream)
         except (OSError, ValueError) as exc:
             raise CacheError("Nenhum ciclo válido. Execute 'open' primeiro.") from exc
-        if state.get("status") not in ("OPEN", "CLOSED") or not isinstance(state.get("items"), list):
+        if state.get("status") not in ("OPEN", "CLOSED", "NAMING", "NAMED") or not isinstance(state.get("items"), list):
             raise CacheError("Estado do ciclo inválido.")
         return state
 
@@ -120,9 +124,60 @@ class Pacote:
             if not directory.is_dir() or directory.is_symlink():
                 raise CacheError("Entrada do cache inválida.")
             children = list(directory.iterdir())
-            if len(children) != 1 or children[0].name != item["name"] or children[0].is_symlink() or not children[0].is_file():
+            expected = {item["renamed"]} if state["status"] == "NAMED" else {item["name"]}
+            if state["status"] == "NAMING":
+                expected.add(item["renamed"])
+            if len(children) != 1 or children[0].name not in expected or children[0].is_symlink() or not children[0].is_file():
                 raise CacheError("Arquivo ausente ou inesperado no cache.")
         return len(items)
+
+    def _rename(self, state: dict, stems: list[str]) -> None:
+        n = len(state["items"])
+        if len(stems) != n or len(set(stems)) != n:
+            raise CacheError("Lista de stems do Namer inválida.")
+        if n:
+            match = re.fullmatch(r"1_([A-Za-z0-9]{3})", stems[0])
+            if match is None or stems != [f"{i}_{match.group(1)}" for i in range(1, n + 1)]:
+                raise CacheError("Índices ou ID do Namer inválidos.")
+
+        if state["status"] == "CLOSED":
+            # Store the complete random bijection before moving anything, so
+            # interrupted renames can resume without drawing new assignments.
+            shuffled = stems.copy()
+            secrets.SystemRandom().shuffle(shuffled)
+            for item, stem in zip(state["items"], shuffled):
+                item["renamed"] = stem + Path(item["name"]).suffix
+            state["status"] = "NAMING"
+            _write_json(self.state_file, state)
+
+        if state["status"] == "NAMED":
+            assigned_stems = {
+                item["renamed"][:-len(Path(item["name"]).suffix)]
+                if Path(item["name"]).suffix else item["renamed"]
+                for item in state["items"]
+            }
+            if assigned_stems != set(stems):
+                raise CacheError("Resposta do Namer diverge da nomeação existente.")
+            return
+
+        assigned_stems = {item["renamed"][:-len(Path(item["name"]).suffix)] if Path(item["name"]).suffix else item["renamed"] for item in state["items"]}
+        if assigned_stems != set(stems):
+            raise CacheError("Atribuições do Pacote divergem da resposta do Namer.")
+        for item in state["items"]:
+            directory = self.files / item["entry"]
+            original = directory / item["name"]
+            renamed = directory / item["renamed"]
+            if renamed == original:
+                continue
+            if renamed.exists():
+                if original.exists():
+                    raise CacheError("Colisão durante a renomeação.")
+                continue  # Already renamed before an interruption.
+            if not original.is_file() or original.is_symlink():
+                raise CacheError("Arquivo original indisponível para renomeação.")
+            original.rename(renamed)
+        state["status"] = "NAMED"
+        _write_json(self.state_file, state)
 
     def close(self) -> int:
         with self._locked():
@@ -131,9 +186,13 @@ class Pacote:
             if state["status"] == "OPEN":
                 state["status"] = "CLOSED"
                 _write_json(self.state_file, state)
-            # If a previous attempt stopped after closing, retry the handoff.
-            # This is the whole Namer interface for this phase: no names or bytes.
+            # The same lock covers the Namer reply and the random assignment.
             _write_json(self.namer_inbox / "n.json", {"n": n})
+            try:
+                stems = Namer(self.runtime).respond()
+            except (NamerError, ValueError, TypeError) as exc:
+                raise CacheError(str(exc)) from exc
+            self._rename(state, stems)
             return n
 
     def status(self) -> dict:
