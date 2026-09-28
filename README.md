@@ -1,43 +1,80 @@
-# AI MEMORY / Mimir
+# AI MEMORY — Input e BN1_1
 
-Implementação incremental da arquitetura Mimir. Esta etapa contém a fronteira **Input** e os componentes **Pacote**, **Namer**, **Sorter** e **BBN1_1**.
+Implementação da primeira etapa do Mimir: receber um lote de arquivos, dar a cada arquivo um nome operacional temporário, classificar as extensões e guardar cópias verificadas no **BBN1_1**. Este README documenta apenas os componentes executáveis até essa fronteira.
 
-## Fluxo atual
+## Arquitetura implementada
 
-```text
-Input / Storage_I (interface CLI)
-    -> BN1_1 / Pacote (arquivos reais em cache)
-    -> n (somente número inteiro) -> BN1_1 / Namer
-    -> lista de stems -> BN1_1 / Pacote (associação aleatória e renomeação)
-    -> nomes renomeados -> BN1_1 / Sorter (extensão -> SHA-256 / IDD)
-    -> pares nome, IDD -> BN1_1 / BBN1_1 (arquivos por extensão)
+```mermaid
+flowchart TB
+    I["Input · janela de recebimento"] -->|"arquivos reais"| P["Pacote · cache efêmero"]
+    P -->|"somente n"| N["Namer"]
+    N -->|"1_ID … n_ID"| P
+    P -->|"somente nomes renomeados"| S["Sorter"]
+    S <-->|"extensão ↔ IDD"| R[("Registro SQLite")]
+    S -->|"nome, IDD"| B["BBN1_1 · pastas por extensão"]
+    B -.->|"requisita arquivo"| P
+    P -->|"bytes + SHA-256 do nome e conteúdo"| B
 ```
 
-Requer Python 3.10+ em sistema POSIX (o bloqueio de processos usa `fcntl`). Na raiz do repositório:
+O **Input** é a porta de entrada externa. O **Pacote** pertence ao BN1_1 e mantém os arquivos reais. Namer e Sorter são componentes de controle: não recebem nem abrem os bytes. O BBN1_1 requisita os arquivos ao Pacote e verifica as cópias antes de guardá-las.
+
+| Etapa | Entrada | Ação e saída |
+| --- | --- | --- |
+| Input → Pacote | Arquivos regulares de qualquer formato | Abre e fecha manualmente um lote; copia cada envio como entrada distinta. |
+| Pacote → Namer | Apenas o inteiro `n` | O Namer gera um ID alfanumérico de três caracteres, usado uma vez no lote, e devolve `1_ID` até `n_ID`. |
+| Namer → Pacote | Lista de stems | O Pacote sorteia uma bijeção, renomeia fisicamente os arquivos e preserva a extensão literal final. |
+| Pacote → Sorter | Nomes como `1_aB7.pdf` | Extrai o token após o último ponto, com distinção entre maiúsculas e minúsculas; calcula `IDD = SHA-256(extensão em UTF-8)`. |
+| Sorter → BBN1_1 | Pares `(nome, IDD)` | O BBN1_1 resolve a extensão no registro, requisita os bytes ao Pacote, verifica hashes e guarda a cópia na pasta dessa extensão. |
+
+O IDD tem **64 caracteres hexadecimais**. Ele substitui o IDD de dois caracteres do desenho inicial: esta implementação segue a decisão posterior de usar SHA-256. Um hash não pode ser desfeito para recuperar a extensão. O registro SQLite conserva a relação `IDD ↔ extensão` e rejeita uma relação conflitante; o BBN1_1 só o consulta. Arquivos sem extensão usam o token vazio, cujo SHA-256 é uma classe própria. `pdf` e `PDF` permanecem distintos.
+
+## Executar
+
+Requer **Python 3.10+ em POSIX**. Usa somente a biblioteca padrão. Na raiz do repositório:
 
 ```bash
 python -m input open
-python -m input add /caminho/arquivo.pdf /caminho/imagem.png
-python -m input add /caminho/outro-arquivo
+python -m input add /caminho/relatorio.pdf /caminho/imagem.PNG
+python -m input add /caminho/arquivo-sem-extensao
 python -m input status
 python -m input close
 ```
 
-`open` ativa a janela; cada `add` copia arquivos regulares de qualquer formato para o Pacote. `close` a desativa, confere as entradas guardadas e entrega exclusivamente `{"n": N}` ao Namer em `.mimir-runtime/BN1_1/Namer/inbox/n.json`. O Namer gera uma vez um ID de três caracteres (`A–Z`, `a–z`, `0–9`), constrói `["1_ID", "2_ID", ..., "n_ID"]` e devolve a lista em `BN1_1/Namer/outbox/stems.json`. O Pacote sorteia uma bijeção entre arquivos e stems, renomeia fisicamente cada arquivo e conserva sua extensão literal após o último ponto. Nenhum byte ou nome original chega ao Namer. A única entrada pública é `python -m input`; o caminho de execução pode ser alterado por `MIMIR_RUNTIME_DIR`.
+`open` inicia a janela; `add` pode ser repetido enquanto ela está aberta. Cada envio conta uma entrada, inclusive dois envios do mesmo arquivo. `close` impede novos envios e executa todo o fluxo até o BBN1_1. Uma nova chamada a `close` retoma uma execução interrompida sem gerar outro ID nem refazer o sorteio. Um diretório de execução aceita um ciclo; use `MIMIR_RUNTIME_DIR` diferente para outro lote.
 
-Após renomear todos os arquivos, o Pacote passa somente a lista de nomes `stem.ext` ao Sorter. Para cada nome, o Sorter extrai o token após o último ponto, respeita maiúsculas/minúsculas e calcula `SHA-256(extensão UTF-8)` como IDD hexadecimal de 64 caracteres. Arquivos sem extensão usam o token vazio e `SHA-256("")`. O Sorter cria uma partição por IDD em `BN1_1/Sorter/partitions/<IDD>/names.json` e mantém `BN1_1/Sorter/extension_registry.json` com a relação verificável `IDD → extensão`. SHA-256 não é reversível: o registro é o mecanismo de recuperação da extensão; inconsistências são recusadas.
+## Dados em execução
 
-Depois da classificação, o BBN1_1 solicita cada arquivo real ao Pacote e confere SHA-256 do nome completo e do conteúdo recebido. As cópias verificadas ficam em `BN1_1/BBN1_1/by_extension/<extensão>/` ou, para arquivos sem extensão, em `BN1_1/BBN1_1/no_extension/`. Assim, `pdf` e `PDF` ficam separados. O Sorter opera apenas com nomes e metadados, sem acessar bytes.
+O código está organizado em `input/` (entrada pública) e `BN1_1/{Pacote,Namer,Sorter,BBN1_1}/` (componentes internos). Os dados são gerados fora das pastas de código e ignorados pelo Git:
 
-Submissões repetidas contam como entradas distintas, mesmo quando o conteúdo ou o nome coincide. Nenhum tipo ou conteúdo é interpretado. Um bloqueio de processo serializa `open`, `add` e `close`; depois de fechado, o ciclo não aceita arquivos novos. `close` pode ser repetido após uma interrupção: o Namer reutiliza a mesma lista e o Pacote retoma a atribuição já registrada.
+```text
+.mimir-runtime/                            # um ciclo; MIMIR_RUNTIME_DIR
+├── cycle.json                            # estado e índice do Pacote
+└── BN1_1/
+    ├── Pacote/files/<entrada>/<nome renomeado>
+    ├── Namer/inbox/n.json                 # somente {"n": ...}
+    ├── Namer/outbox/stems.json
+    ├── Sorter/partitions/<IDD>/names.json  # somente nomes
+    └── BBN1_1/
+        ├── by_extension/<extensão>/<nome renomeado>
+        └── no_extension/<nome renomeado>
 
-O cache, o registro e o BBN1_1 ficam no diretório de execução, ignorado pelo Git. **Não há expiração automática nesta etapa.** A confirmação para liberar a limpeza do Pacote e o prazo de retenção ainda serão definidos; os originais no Pacote permanecem após a cópia verificada. Para testar outro ciclo, use outro diretório de execução temporário com `MIMIR_RUNTIME_DIR`.
+.mimir-state/extensions.sqlite3           # registro entre ciclos; MIMIR_REGISTRY_DB
+```
 
-## Limites desta etapa
+SQLite foi escolhido para o registro durável porque fornece unicidade e transações sem dependências adicionais. Os arquivos reais continuam no sistema de arquivos: colocá-los como BLOBs no registro duplicaria o armazenamento e impediria a organização por pastas pedida para o BBN1_1. Os pequenos JSONs guardam o estado e as mensagens de **um ciclo**, enquanto o SQLite conserva extensões entre ciclos.
 
-- `Input` é a fronteira externa; `BN1_1/Pacote` guarda os originais. Namer recebe apenas `n`; Sorter recebe apenas nomes; BBN1_1 recebe bytes apenas sob demanda ao Pacote.
-- O próximo passo arquitetural é a fronteira BBN1_1 → Transformer_Core; ela ainda não existe.
-- O registro de IDDs é persistido no diretório de execução do ciclo. SHA-256 cobre extensões arbitrárias de forma determinística, mas nenhum hash finito pode oferecer reversibilidade ou ausência matemática de colisões; divergências detectadas interrompem a entrega.
-- O cache é em disco para permitir arquivos arbitrários e sobreviver ao encerramento do comando. A política futura de TTL e a liberação após confirmação do BBN1_1 estão pendentes.
+## Integridade e estado
 
-Teste: `python -m unittest discover -s tests -v`.
+- Um bloqueio de processo serializa `open`, `add` e `close`. Depois do fechamento, o lote não aceita alterações.
+- O Pacote registra SHA-256 do conteúdo na entrada e confere novamente ao fornecê-lo. O BBN1_1 compara SHA-256 do nome completo e dos bytes recebidos antes de publicar a cópia.
+- A associação arquivo ↔ stem é armazenada antes da renomeação, para permitir retomada após uma interrupção. Cópias incompletas e não indexadas de um `add` interrompido são descartadas enquanto a janela ainda está aberta.
+- O registro de extensões distingue letras maiúsculas e minúsculas. SHA-256 é determinístico, mas não oferece reversão nem uma garantia matemática de ausência de colisões; conflitos detectados interrompem o fluxo.
+- O estado final desta etapa é `STAGED`: o BBN1_1 possui as cópias verificadas. Os originais do Pacote continuam retidos; não há expiração ou limpeza automática definida.
+
+## Regressões
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+O mesmo comando roda no [workflow de CI](.github/workflows/ci.yml) em Python 3.10 e 3.12. Os testes cobrem concorrência, IDs estáveis, retomada, extensões com diferença de caixa, arquivos sem extensão, registro entre ciclos e detecção de alterações no cache.

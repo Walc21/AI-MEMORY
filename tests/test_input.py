@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,9 @@ class InputFlowTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.runtime = self.base / "runtime"
-        self.env = {**os.environ, "MIMIR_RUNTIME_DIR": str(self.runtime)}
+        self.registry_db = self.base / "persistent" / "extensions.sqlite3"
+        self.env = {**os.environ, "MIMIR_RUNTIME_DIR": str(self.runtime),
+                    "MIMIR_REGISTRY_DB": str(self.registry_db)}
 
     def run_cli(self, *args, expected=0):
         result = subprocess.run(
@@ -108,7 +111,8 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("add", *(self.base / name for name in names))
         self.run_cli("close")
 
-        registry = json.loads((self.runtime / "BN1_1/Sorter/extension_registry.json").read_text())
+        with sqlite3.connect(self.registry_db) as connection:
+            registry = dict(connection.execute("SELECT idd, extension FROM extension_registry"))
         for extension in ["pdf", "PDF", "gz", ""]:
             digest = hashlib.sha256(extension.encode()).hexdigest()
             self.assertEqual(registry[digest], extension)
@@ -127,13 +131,43 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("open")
         self.run_cli("add", source)
         self.run_cli("close")
-        registry_path = self.runtime / "BN1_1/Sorter/extension_registry.json"
-        registry = json.loads(registry_path.read_text())
-        registry[hashlib.sha256(b"pdf").hexdigest()] = "other"
-        registry_path.write_text(json.dumps(registry))
+        with sqlite3.connect(self.registry_db) as connection:
+            connection.execute("UPDATE extension_registry SET extension = ? WHERE idd = ?",
+                               ("other", hashlib.sha256(b"pdf").hexdigest()))
         self.run_cli("close", expected=1)
         cached = next((self.runtime / "BN1_1/Pacote/files").glob("*/*"))
         self.assertEqual(cached.read_bytes(), b"payload")
+
+    def test_registry_is_shared_across_separate_cycle_directories(self):
+        first = self.base / "first.pdf"
+        first.write_bytes(b"first")
+        self.run_cli("open")
+        self.run_cli("add", first)
+        self.run_cli("close")
+        self.env["MIMIR_RUNTIME_DIR"] = str(self.base / "second-cycle")
+        second = self.base / "second.pdf"
+        second.write_bytes(b"second")
+        self.run_cli("open")
+        self.run_cli("add", second)
+        self.run_cli("close")
+        with sqlite3.connect(self.registry_db) as connection:
+            rows = list(connection.execute("SELECT idd, extension FROM extension_registry"))
+        self.assertEqual(rows, [(hashlib.sha256(b"pdf").hexdigest(), "pdf")])
+
+    def test_changed_cached_bytes_are_refused_and_incomplete_add_is_recovered(self):
+        source = self.base / "source.txt"
+        source.write_bytes(b"original")
+        self.run_cli("open")
+        self.run_cli("add", source)
+        orphan = self.runtime / "BN1_1/Pacote/files" / ("f" * 32)
+        orphan.mkdir()
+        (orphan / "partial").write_bytes(b"partial")
+        cached = next((self.runtime / "BN1_1/Pacote/files").glob("*/source.txt"))
+        cached.write_bytes(b"altered!")
+        self.run_cli("close", expected=1)
+        self.assertFalse(orphan.exists())
+        folder = self.runtime / "BN1_1/BBN1_1/by_extension/txt"
+        self.assertFalse(folder.exists() and any(folder.iterdir()))
 
 
 if __name__ == "__main__":

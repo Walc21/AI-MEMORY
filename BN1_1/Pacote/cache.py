@@ -80,8 +80,10 @@ class Pacote:
         with self._locked():
             if self.state_file.exists() or self.state_file.is_symlink():
                 raise CacheError("Já existe um ciclo; um novo Input depende da conclusão e limpeza do anterior.")
-            self.files.mkdir(mode=0o700, parents=True)
-            self.namer_inbox.mkdir(mode=0o700, parents=True)
+            self.files.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self.namer_inbox.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if any(self.files.iterdir()) or any(self.namer_inbox.iterdir()):
+                raise CacheError("Há dados de um início incompleto; escolha outro diretório de execução.")
             _write_json(self.state_file, {"status": "OPEN", "items": []})
 
     def add(self, paths: list[Path]) -> int:
@@ -91,6 +93,7 @@ class Pacote:
             state = self._state()
             if state["status"] != "OPEN":
                 raise CacheError("A janela de entrada está fechada.")
+            self._recover_open(state)
             for source in paths:
                 # No filename or extension is inspected for classification. Every
                 # successful submission is a distinct file entry, even if bytes match.
@@ -106,16 +109,33 @@ class Pacote:
                         if name in ("", ".", ".."):
                             raise CacheError("Nome de arquivo inválido.")
                         target = destination_dir / name
+                        content_hash = hashlib.sha256()
                         with target.open("xb") as outgoing:
-                            shutil.copyfileobj(incoming, outgoing)
+                            for chunk in iter(lambda: incoming.read(1024 * 1024), b""):
+                                outgoing.write(chunk)
+                                content_hash.update(chunk)
                             outgoing.flush()
                             os.fsync(outgoing.fileno())
-                    state["items"].append({"entry": entry_id, "name": name})
+                    state["items"].append({
+                        "entry": entry_id, "name": name,
+                        "sha256_content": content_hash.hexdigest(),
+                    })
                     _write_json(self.state_file, state)
                 except (OSError, CacheError):
                     shutil.rmtree(destination_dir)
                     raise
             return len(state["items"])
+
+    def _recover_open(self, state: dict) -> None:
+        """Discard only incomplete, unindexed copies from an interrupted add."""
+        if state["status"] != "OPEN":
+            return
+        indexed = {item["entry"] for item in state["items"]}
+        for entry in self.files.iterdir():
+            if entry.name not in indexed:
+                if not re.fullmatch(r"[0-9a-f]{32}", entry.name) or entry.is_symlink() or not entry.is_dir():
+                    raise CacheError("Entrada inesperada no cache; recuperação interrompida.")
+                shutil.rmtree(entry)
 
     def _count(self, state: dict) -> int:
         items = state["items"]
@@ -199,11 +219,15 @@ class Pacote:
                 outgoing.write(chunk)
             outgoing.flush()
             os.fsync(outgoing.fileno())
+        expected_hash = matches[0].get("sha256_content")
+        if expected_hash is not None and content_hash.hexdigest() != expected_hash:
+            raise CacheError("O conteúdo no Pacote mudou desde a entrada.")
         return hashlib.sha256(filename.encode("utf-8")).hexdigest(), content_hash.hexdigest()
 
     def close(self) -> int:
         with self._locked():
             state = self._state()
+            self._recover_open(state)
             n = self._count(state)
             if state["status"] == "OPEN":
                 state["status"] = "CLOSED"

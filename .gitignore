@@ -1,3 +1,6 @@
 .mimir-runtime/
+.mimir-state/
+*.sqlite3-wal
+*.sqlite3-shm
 __pycache__/
 *.py[cod]
