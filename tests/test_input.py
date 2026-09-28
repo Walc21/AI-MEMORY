@@ -8,6 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from BN1_1.BBN1_1.buffer import BBN1_1, BufferError
+from Transformer_Core.Hot_Hub.hub import HotHub, HubError
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -101,9 +104,9 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("close")
         self.assertTrue((directory / item["renamed"]).is_file())
         self.assertEqual(json.loads((self.runtime / "BN1_1/Namer/outbox/stems.json").read_text())["stems"], stems)
-        self.assertEqual(json.loads(state_path.read_text())["status"], "STAGED")
+        self.assertEqual(json.loads(state_path.read_text())["status"], "HUB_READY")
 
-    def test_sorter_uses_hash_registry_and_bbn_preserves_case_and_last_suffix(self):
+    def test_sorter_registry_and_hub_preserve_case_and_last_suffix(self):
         names = ["a.pdf", "b.pdf", "c.PDF", "archive.tar.gz", "plain"]
         for name in names:
             (self.base / name).write_bytes(name.encode())
@@ -119,11 +122,12 @@ class InputFlowTest(unittest.TestCase):
             partition = json.loads((self.runtime / "BN1_1/Sorter/partitions" / digest / "names.json").read_text())
             self.assertEqual(partition["idd"], digest)
             self.assertEqual(len(partition["filenames"]), 2 if extension == "pdf" else 1)
-            folder = self.runtime / "BN1_1/BBN1_1" / (f"by_extension/{extension}" if extension else "no_extension")
+            folder = self.runtime / "Transformer_Core/Hot_Hub/data" / (f"by_extension/{extension}" if extension else "no_extension")
             self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(partition["filenames"]))
-        contents = [p.read_bytes() for p in (self.runtime / "BN1_1/BBN1_1").rglob("*") if p.is_file()]
+        contents = [p.read_bytes() for p in (self.runtime / "Transformer_Core/Hot_Hub/data").rglob("*") if p.is_file()]
         self.assertEqual(sorted(contents), sorted(name.encode() for name in names))
-        self.assertEqual(json.loads((self.runtime / "cycle.json").read_text())["status"], "STAGED")
+        self.assertFalse((self.runtime / "BN1_1/BBN1_1").exists())
+        self.assertEqual(json.loads((self.runtime / "cycle.json").read_text())["status"], "HUB_READY")
 
     def test_sorter_rejects_hash_inconsistency_without_touching_cached_bytes(self):
         source = self.base / "sample.pdf"
@@ -134,6 +138,10 @@ class InputFlowTest(unittest.TestCase):
         with sqlite3.connect(self.registry_db) as connection:
             connection.execute("UPDATE extension_registry SET extension = ? WHERE idd = ?",
                                ("other", hashlib.sha256(b"pdf").hexdigest()))
+        state_path = self.runtime / "cycle.json"
+        state = json.loads(state_path.read_text())
+        state["status"] = "STAGED"  # Recreate the point before the hub handoff.
+        state_path.write_text(json.dumps(state))
         self.run_cli("close", expected=1)
         cached = next((self.runtime / "BN1_1/Pacote/files").glob("*/*"))
         self.assertEqual(cached.read_bytes(), b"payload")
@@ -168,6 +176,49 @@ class InputFlowTest(unittest.TestCase):
         self.assertFalse(orphan.exists())
         folder = self.runtime / "BN1_1/BBN1_1/by_extension/txt"
         self.assertFalse(folder.exists() and any(folder.iterdir()))
+
+    def test_bbn_cleanup_requires_both_hub_and_pacote_copies(self):
+        bbn = BBN1_1(self.runtime)
+        original = bbn.root / "by_extension" / "pdf" / "1_aB7.pdf"
+        original.parent.mkdir(parents=True)
+        original.write_bytes(b"verified")
+        relative = "by_extension/pdf/1_aB7.pdf"
+        expected = {relative: hashlib.sha256(b"verified").hexdigest()}
+        hub = HotHub(self.runtime)
+        hub.mirror(bbn.root, expected)
+
+        with self.assertRaises(BufferError):
+            bbn.purge_verified(expected, hub, lambda: {})
+        self.assertTrue(original.exists())
+        (hub.data / relative).write_bytes(b"corrupted")
+        with self.assertRaises(HubError):
+            bbn.purge_verified(expected, hub, lambda: expected)
+        self.assertTrue(original.exists())
+
+        hub.mirror(bbn.root, expected)
+        bbn.purge_verified(expected, hub, lambda: expected)
+        self.assertFalse(bbn.root.exists())
+        self.assertEqual((hub.data / relative).read_bytes(), b"verified")
+
+    def test_interrupted_bbn_cleanup_can_restart_from_pacote(self):
+        source = self.base / "sample.md"
+        source.write_bytes(b"document")
+        self.run_cli("open")
+        self.run_cli("add", source)
+        self.run_cli("close")
+        state_path = self.runtime / "cycle.json"
+        state = json.loads(state_path.read_text())
+        state["status"] = "HUB_VERIFIED"
+        state_path.write_text(json.dumps(state))
+        self.run_cli("close")
+        self.assertFalse((self.runtime / "BN1_1/BBN1_1").exists())
+        self.assertEqual(json.loads(state_path.read_text())["status"], "HUB_READY")
+
+        mirrored = next((self.runtime / "Transformer_Core/Hot_Hub/data").rglob("*.md"))
+        mirrored.write_bytes(b"damage")
+        self.run_cli("close")
+        self.assertEqual(mirrored.read_bytes(), b"document")
+        self.assertEqual(json.loads(state_path.read_text())["status"], "HUB_READY")
 
 
 if __name__ == "__main__":
