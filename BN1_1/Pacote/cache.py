@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from BN1_1.Namer.namer import Namer, NamerError
+from BN1_1.Sorter.sorter import Sorter, SorterError
+from BN1_1.BBN1_1.buffer import BBN1_1, BufferError
 
 
 class CacheError(Exception):
@@ -69,7 +72,7 @@ class Pacote:
                 state = json.load(stream)
         except (OSError, ValueError) as exc:
             raise CacheError("Nenhum ciclo válido. Execute 'open' primeiro.") from exc
-        if state.get("status") not in ("OPEN", "CLOSED", "NAMING", "NAMED") or not isinstance(state.get("items"), list):
+        if state.get("status") not in ("OPEN", "CLOSED", "NAMING", "NAMED", "STAGED") or not isinstance(state.get("items"), list):
             raise CacheError("Estado do ciclo inválido.")
         return state
 
@@ -124,7 +127,7 @@ class Pacote:
             if not directory.is_dir() or directory.is_symlink():
                 raise CacheError("Entrada do cache inválida.")
             children = list(directory.iterdir())
-            expected = {item["renamed"]} if state["status"] == "NAMED" else {item["name"]}
+            expected = {item["renamed"]} if state["status"] in ("NAMED", "STAGED") else {item["name"]}
             if state["status"] == "NAMING":
                 expected.add(item["renamed"])
             if len(children) != 1 or children[0].name not in expected or children[0].is_symlink() or not children[0].is_file():
@@ -150,7 +153,7 @@ class Pacote:
             state["status"] = "NAMING"
             _write_json(self.state_file, state)
 
-        if state["status"] == "NAMED":
+        if state["status"] in ("NAMED", "STAGED"):
             assigned_stems = {
                 item["renamed"][:-len(Path(item["name"]).suffix)]
                 if Path(item["name"]).suffix else item["renamed"]
@@ -179,6 +182,25 @@ class Pacote:
         state["status"] = "NAMED"
         _write_json(self.state_file, state)
 
+    def supply(self, filename: str, target: Path) -> tuple[str, str]:
+        """Provide one named file on BBN1_1 request; Sorter never calls this."""
+        state = self._state()
+        matches = [item for item in state["items"] if item.get("renamed") == filename]
+        if len(matches) != 1 or state["status"] not in ("NAMED", "STAGED"):
+            raise CacheError("Arquivo requisitado pelo BBN1_1 não está disponível.")
+        source = self.files / matches[0]["entry"] / filename
+        content_hash = hashlib.sha256()
+        descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as incoming, target.open("wb") as outgoing:
+            if not stat.S_ISREG(os.fstat(incoming.fileno()).st_mode):
+                raise CacheError("Entrada inválida no cache.")
+            for chunk in iter(lambda: incoming.read(1024 * 1024), b""):
+                content_hash.update(chunk)
+                outgoing.write(chunk)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        return hashlib.sha256(filename.encode("utf-8")).hexdigest(), content_hash.hexdigest()
+
     def close(self) -> int:
         with self._locked():
             state = self._state()
@@ -193,6 +215,17 @@ class Pacote:
             except (NamerError, ValueError, TypeError) as exc:
                 raise CacheError(str(exc)) from exc
             self._rename(state, stems)
+            sorter = Sorter(self.runtime)
+            try:
+                groups = sorter.classify([item["renamed"] for item in state["items"]])
+                stored = BBN1_1(self.runtime).store(groups, sorter, self)
+            except (SorterError, BufferError) as exc:
+                raise CacheError(str(exc)) from exc
+            if stored != n:
+                raise CacheError("O BBN1_1 não recebeu todos os arquivos.")
+            if state["status"] != "STAGED":
+                state["status"] = "STAGED"
+                _write_json(self.state_file, state)
             return n
 
     def status(self) -> dict:
