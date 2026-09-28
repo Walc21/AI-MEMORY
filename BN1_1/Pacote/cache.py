@@ -18,6 +18,7 @@ from pathlib import Path
 from BN1_1.Namer.namer import Namer, NamerError
 from BN1_1.Sorter.sorter import Sorter, SorterError
 from BN1_1.BBN1_1.buffer import BBN1_1, BufferError
+from Transformer_Core.Hot_Hub.hub import HotHub, HubError, _digest
 
 
 class CacheError(Exception):
@@ -72,7 +73,10 @@ class Pacote:
                 state = json.load(stream)
         except (OSError, ValueError) as exc:
             raise CacheError("Nenhum ciclo válido. Execute 'open' primeiro.") from exc
-        if state.get("status") not in ("OPEN", "CLOSED", "NAMING", "NAMED", "STAGED") or not isinstance(state.get("items"), list):
+        if state.get("status") not in (
+            "OPEN", "CLOSED", "NAMING", "NAMED", "STAGED",
+            "MIRRORING", "HUB_VERIFIED", "HUB_READY",
+        ) or not isinstance(state.get("items"), list):
             raise CacheError("Estado do ciclo inválido.")
         return state
 
@@ -147,7 +151,9 @@ class Pacote:
             if not directory.is_dir() or directory.is_symlink():
                 raise CacheError("Entrada do cache inválida.")
             children = list(directory.iterdir())
-            expected = {item["renamed"]} if state["status"] in ("NAMED", "STAGED") else {item["name"]}
+            expected = {item["renamed"]} if state["status"] in (
+                "NAMED", "STAGED", "MIRRORING", "HUB_VERIFIED", "HUB_READY"
+            ) else {item["name"]}
             if state["status"] == "NAMING":
                 expected.add(item["renamed"])
             if len(children) != 1 or children[0].name not in expected or children[0].is_symlink() or not children[0].is_file():
@@ -173,7 +179,7 @@ class Pacote:
             state["status"] = "NAMING"
             _write_json(self.state_file, state)
 
-        if state["status"] in ("NAMED", "STAGED"):
+        if state["status"] in ("NAMED", "STAGED", "MIRRORING", "HUB_VERIFIED", "HUB_READY"):
             assigned_stems = {
                 item["renamed"][:-len(Path(item["name"]).suffix)]
                 if Path(item["name"]).suffix else item["renamed"]
@@ -206,7 +212,9 @@ class Pacote:
         """Provide one named file on BBN1_1 request; Sorter never calls this."""
         state = self._state()
         matches = [item for item in state["items"] if item.get("renamed") == filename]
-        if len(matches) != 1 or state["status"] not in ("NAMED", "STAGED"):
+        if len(matches) != 1 or state["status"] not in (
+            "NAMED", "STAGED", "MIRRORING", "HUB_VERIFIED", "HUB_READY"
+        ):
             raise CacheError("Arquivo requisitado pelo BBN1_1 não está disponível.")
         source = self.files / matches[0]["entry"] / filename
         content_hash = hashlib.sha256()
@@ -224,11 +232,37 @@ class Pacote:
             raise CacheError("O conteúdo no Pacote mudou desde a entrada.")
         return hashlib.sha256(filename.encode("utf-8")).hexdigest(), content_hash.hexdigest()
 
+    def _expected_mirror(self, state: dict) -> dict[str, str]:
+        """Verify the Pacote copy and describe the exact mirrored file tree."""
+        expected = {}
+        for item in state["items"]:
+            filename = item["renamed"]
+            extension = Sorter.extension(filename)
+            relative = (Path("by_extension") / extension / filename if extension
+                        else Path("no_extension") / filename).as_posix()
+            digest = _digest(self.files / item["entry"] / filename)
+            if item.get("sha256_content") not in (None, digest):
+                raise CacheError("O conteúdo do Pacote mudou desde a entrada.")
+            if relative in expected:
+                raise CacheError("Dois arquivos disputam o mesmo destino no Hot Hub.")
+            expected[relative] = digest
+        return expected
+
     def close(self) -> int:
         with self._locked():
             state = self._state()
             self._recover_open(state)
             n = self._count(state)
+            if state["status"] == "HUB_READY":
+                expected = self._expected_mirror(state)
+                try:
+                    HotHub(self.runtime).verify(expected)
+                    return n
+                except HubError:
+                    # Pacote is still intact: rebuild the intermediate copy,
+                    # then repair the hub before releasing BBN1_1 again.
+                    state["status"] = "STAGED"
+                    _write_json(self.state_file, state)
             if state["status"] == "OPEN":
                 state["status"] = "CLOSED"
                 _write_json(self.state_file, state)
@@ -250,6 +284,18 @@ class Pacote:
             if state["status"] != "STAGED":
                 state["status"] = "STAGED"
                 _write_json(self.state_file, state)
+            expected = self._expected_mirror(state)
+            hub = HotHub(self.runtime)
+            bbn = BBN1_1(self.runtime)
+            state["status"] = "MIRRORING"
+            _write_json(self.state_file, state)
+            if hub.mirror(bbn.root, expected) != n:
+                raise CacheError("O Hot Hub não recebeu o lote completo.")
+            state["status"] = "HUB_VERIFIED"
+            _write_json(self.state_file, state)
+            bbn.purge_verified(expected, hub, lambda: self._expected_mirror(state))
+            state["status"] = "HUB_READY"
+            _write_json(self.state_file, state)
             return n
 
     def status(self) -> dict:

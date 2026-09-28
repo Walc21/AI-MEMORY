@@ -4,8 +4,10 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 from BN1_1.Sorter.sorter import Sorter
+from Transformer_Core.Hot_Hub.hub import HotHub, _digest
 
 
 class BufferError(Exception):
@@ -49,3 +51,27 @@ class BBN1_1:
                     if os.path.exists(temporary):
                         os.unlink(temporary)
         return stored
+
+    def purge_verified(
+        self, expected: dict[str, str], hub: HotHub,
+        verify_pacote: Callable[[], dict[str, str]],
+    ) -> None:
+        """Drop BBN bytes only while two complete verified copies exist."""
+        hub.verify(expected)
+        if verify_pacote() != expected:
+            raise BufferError("A segunda cópia no Pacote não está íntegra.")
+        actual = HotHub._tree_files(self.root)
+        if actual != set(expected):
+            raise BufferError("O BBN1_1 diverge do lote antes da limpeza.")
+        for relative, digest in expected.items():
+            if _digest(self.root / relative) != digest:
+                raise BufferError("Arquivo do BBN1_1 alterado antes da limpeza.")
+        for relative in expected:
+            (self.root / relative).unlink()
+        if self.root.exists():
+            for directory in sorted(
+                (p for p in self.root.rglob("*") if p.is_dir()),
+                key=lambda p: len(p.parts), reverse=True,
+            ):
+                directory.rmdir()
+            self.root.rmdir()

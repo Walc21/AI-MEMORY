@@ -22,6 +22,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Check syntax
-        run: python -m compileall -q input BN1_1 tests
+        run: python -m compileall -q input BN1_1 Transformer_Core tests
       - name: Run regressions
         run: python -m unittest discover -s tests -v
