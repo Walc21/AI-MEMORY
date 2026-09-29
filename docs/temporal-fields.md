@@ -42,6 +42,8 @@ Som, imagem e vetor também não são três classes exclusivas: imagens e sons j
 
 A representação de todo arquivo inclui um `byte_field`, referenciando os originais sem duplicá-los novamente. Os adaptadores acrescentam campos decodificados somente quando conhecem a codificação. Não há execução de programas, carregamento de objetos pickle, resolução de referências externas de playlists ou simulação arbitrária de arquivos.
 
+Os adaptadores de PDF e XLSX foram acrescentados para conteúdo sondado pelos bytes. PDFs com texto extraível produzem, por página, um vetor de pontos de código Unicode na ordem devolvida por pypdf. Isso não é OCR nem recuperação de layout espacial. XLSX produz uma grade `float64` por aba quando todas as células de sua área retangular são números finitos, não são fórmulas e os inteiros não excedem `2^53` em módulo. Planilhas com texto, datas, células vazias, booleanos e fórmulas permanecem opacas nesta versão. O relógio desses dois campos é um instantâneo estático convencionado, não uma sequência histórica reconstruída. Limites de páginas, abas, elementos e tamanho descompactado são verificados antes da publicação.
+
 ## Contrato físico
 
 `fields.json` publica uma geração `mimir.sampled-fields.v1` completa:
