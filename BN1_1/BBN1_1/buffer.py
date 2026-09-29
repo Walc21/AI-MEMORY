@@ -28,8 +28,7 @@ class BBN1_1:
 
     def store(self, groups: dict[str, list[str]], sorter: Sorter, pacote) -> int:
         stored = 0
-        for digest, filenames in groups.items():
-            extension = sorter.extension_for(digest)
+        for extension, filenames in groups.items():
             # A separate branch avoids collision with any literal extension.
             folder = self.root / "by_extension" / extension if extension else self.root / "no_extension"
             folder.mkdir(mode=0o700, parents=True, exist_ok=True)
