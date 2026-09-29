@@ -57,6 +57,10 @@ python -m input close
 python -m input status
 ```
 
+`close` informa quantos arquivos foram decodificados, parcialmente modelados ou mantidos como opacos. `HUB_READY` significa que o lote foi preservado e que todos os registros foram publicados; **não significa que todos os formatos foram decodificados**.
+
+Uma nova chamada a `close` retoma uma execução interrompida sem gerar outro ID nem refazer o sorteio. Ela também verifica os originais e os derivados e pode reconstruir dados alterados a partir do Pacote íntegro. Cada diretório de execução aceita um ciclo; escolha outro `MIMIR_RUNTIME_DIR` para um lote independente.
+
 ## Demonstração reproduzível: quatro formatos, um ciclo
 
 O gerador [`examples/hot_hub_four_formats.py`](examples/hot_hub_four_formats.py) cria entradas **sintéticas**: uma página PDF com uma frase, cinco segundos de áudio PCM que simula ruído de tráfego, cinco segundos de estrada desenhada em vídeo Matroska/FFV1 (50 quadros a 10 fps) e uma aba XLSX de 5 linhas por 5 colunas, preenchida de 1 a 25. São dados de teste, não uma gravação nem uma filmagem reais.
@@ -109,10 +113,6 @@ with TemporaryDirectory() as directory:
 | `medidas.xlsx`: aba `Medidas`, 5×5 números de 1 a 25 | `openpyxl`, `decoded`; `sheet_1`, eixos `[row,column]`, array `[5,5]`, primeira linha `[1,2,3,4,5]` e última `[21,22,23,24,25]`. |
 
 Cada registro conserva a referência ao original e seu SHA-256. A matemática do campo é compartilhada; **a extração dos bytes requer um adaptador por codificação**. O exemplo mostra quatro codificações cobertas, não uma conversão sem decodificadores de qualquer arquivo. O texto do PDF não traz coordenadas confiáveis, a planilha só aceita grades numéricas no adaptador atual, o áudio não é transcrito e o vídeo não identifica veículos ou movimento de objetos.
-
-`close` informa quantos arquivos foram decodificados, parcialmente modelados ou mantidos como opacos. `HUB_READY` significa que o lote foi preservado e que todos os registros foram publicados; **não significa que todos os formatos foram decodificados**.
-
-Uma nova chamada a `close` retoma uma execução interrompida sem gerar outro ID nem refazer o sorteio. Ela também verifica os originais e os derivados e pode reconstruir dados alterados a partir do Pacote íntegro. Cada diretório de execução aceita um ciclo; escolha outro `MIMIR_RUNTIME_DIR` para um lote independente.
 
 ## Dados e integridade
 
