@@ -15,7 +15,7 @@ def main() -> int:
     commands.add_parser("open", help="Abre um novo Input")
     add = commands.add_parser("add", help="Copia arquivos reais para o Pacote")
     add.add_argument("files", nargs="+", type=Path)
-    commands.add_parser("close", help="Fecha, preserva os originais e cria os campos no Hot Hub")
+    commands.add_parser("close", help="Fecha e publica os chunks de bytes no Hot Hub")
     commands.add_parser("status", help="Mostra o estado sem abrir arquivos")
     args = parser.parse_args()
 
@@ -30,7 +30,7 @@ def main() -> int:
         elif args.command == "close":
             print(f"Input fechado. n={pacote.close()}; Hot Hub verificado, representações publicadas e cache do BBN1_1 liberado.")
             counts = pacote.status()["representations"]
-            print(f"Decodificados: {counts['decoded']}; parciais: {counts['partial']}; não modelados: {counts['opaque']}.")
+            print(f"Arquivos: {counts['files']}; bytes: {counts['bytes']}; chunks: {counts['chunks']}.")
         else:
             print(json.dumps(pacote.status(), ensure_ascii=False))
     except (CacheError, HubError, OSError) as exc:
@@ -40,3 +40,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

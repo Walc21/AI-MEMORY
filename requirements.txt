@@ -1,5 +1,2 @@
-numpy>=1.26,<3
-av==16.1.0
-openpyxl>=3.1,<4
-pypdf>=6,<7
-reportlab>=4,<5  # only used to create reproducible PDF demo fixtures
+# Runtime uses only the Python standard library.
+# Optional four-format fixtures: pip install -r requirements-demo.txt

@@ -1,8 +1,8 @@
 # AI MEMORY / Mimir
 
-Ingestão local de arquivos com originais preservados e uma representação comum de **campos de valores, eixos e tempo**. O armazenamento não separa arquivos por extensão, formato ou modalidade. A entrada pública é `python -m input`.
+Ingestão local de qualquer arquivo regular em **um único formato de saída: conjuntos de chunks de bytes em JSON Lines (`.jsonl`)**. Cada arquivo produz um vetor ordenado de bytes e seu próprio conjunto de chunks de **1024 componentes inteiros entre 0 e 255**.
 
-O Hot Hub agora faz duas operações: mantém uma cópia verificada do lote e publica representações numéricas dos conteúdos que consegue decodificar. Um formato desconhecido permanece disponível como bytes, com estado explícito de **não modelado**. Não é apresentado como uma transformação concluída.
+O Hot Hub processa exclusivamente os bytes do arquivo. PDF, áudio, vídeo, planilha, arquivo desconhecido ou arquivo com conteúdo inválido seguem exatamente o mesmo algoritmo. A extensão é somente um marcador para as etapas futuras.
 
 ## Fluxo implementado
 
@@ -11,142 +11,136 @@ flowchart TB
     I["Input · janela manual"] --> P["Pacote · originais"]
     P -->|"somente n"| N["Namer"]
     N -->|"1_ID até n_ID"| P
-    P -->|"nomes, bytes e integridade"| B["BBN1_1 · armazenamento plano"]
-    B --> H["Hot Hub"]
-    H --> O["Originais verificados"]
-    H --> F["Campos numéricos e tempo"]
-    F --> M["Manifesto completo do lote"]
-    O --> M
+    P --> B["BBN1_1 · bytes verificados"]
+    B --> H["Hot Hub · um vetor por arquivo"]
+    H --> C["Chunks de 1024 bytes com identidade e índice"]
+    C --> M["Conjuntos separados · uma geração publicada"]
 ```
 
-1. `open` abre a janela; `add` recebe arquivos regulares de qualquer formato. Cada envio é uma entrada, mesmo com bytes iguais.
-2. `close` fecha a janela. O Pacote conta o lote e envia somente `n` ao Namer.
-3. O Namer gera um ID de três caracteres alfanuméricos por lote e devolve os stems `1_ID` até `n_ID`. O Pacote associa os stems aos arquivos, salva a associação e renomeia. O sufixo original é preservado no nome, sem determinar o destino ou o decodificador.
-4. O BBN1_1 recebe a lista diretamente do Pacote, requisita os bytes e verifica os hashes de nome e conteúdo. Todos os arquivos ficam na mesma pasta.
-5. O Hot Hub recebe os originais, verifica o lote e gera campos numéricos a partir do conteúdo. Amostras, tempos, diferenças e proveniência são publicados em uma geração verificada.
-6. O BBN1_1 libera suas cópias somente depois da publicação e da confirmação de dois conjuntos completos de originais: Pacote e Hot Hub.
+1. `open` abre um ciclo. Cada envio por `add` é um arquivo distinto, mesmo se o conteúdo for igual.
+2. `close` envia somente a quantidade `n` ao Namer. O Pacote recebe os stems `X_ID`, atribui-os aos arquivos e preserva a extensão original, inclusive maiúsculas.
+3. O BBN1_1 requisita os arquivos ao Pacote e verifica os hashes de nome e conteúdo.
+4. O Hot Hub lê **um arquivo por vez** em modo binário. Seu vetor contém todos os bytes, na ordem original, inclusive cabeçalhos, metadados e conteúdo comprimido.
+5. O vetor é particionado em chunks; cada chunk recebe `marker`, `source_id`, `index` e `valid_length`. Cada arquivo tem seu próprio registro `.jsonl`.
+6. O lote só é publicado após verificar todos os registros e reconstruir seus hashes. O BBN1_1 libera as cópias intermediárias somente após confirmar os chunks e o Pacote íntegros.
 
-**Sorter, IDD e partições por extensão foram removidos.** As fontes arquiteturais de 28/09/2026 descrevem a versão anterior; o [contrato de campos](docs/temporal-fields.md) registra a alteração e os limites da implementação atual.
+**Sorter, IDD, adaptadores, campos temporais, decodificação e derivados `.npy` não integram esta fase.** Os documentos arquiteturais anteriores e o histórico Git descrevem versões substituídas. O [contrato de bytes](docs/byte-chunks.md) é a especificação atual.
 
-## O que a representação faz
+## Matemática e algoritmo único
 
-| Entrada | Representação implementada | Tempo |
-| --- | --- | --- |
-| Imagem estática reconhecida | Planos de amostras na resolução e profundidade fornecidas pelo decodificador; sem conversão automática para RGB de 8 bits | Campo constante no tempo; variação temporal zero |
-| Áudio decodificável | Amostras e canais nativos, em blocos; diferenças entre amostras e entre blocos | Taxa de amostragem e timestamps nativos |
-| Vídeo decodificável | Todos os quadros das trilhas suportadas; planos nativos e diferenças entre quadros | Timestamps racionais reais; não fixa 24 fps |
-| PDF com texto extraível | Um vetor de pontos de código Unicode por página; ordem devolvida pelo extrator, sem geometria de página | Página tratada como instantâneo estático |
-| XLSX com células numéricas | Uma grade numérica por aba, com eixos linha e coluna; os valores são publicados em `float64` | Aba tratada como instantâneo estático |
-| Tensor NumPy numérico (`.npy`) | Eixos e dtype preservados, sem projetar os dados em três dimensões | Não presume que algum eixo seja tempo |
-| Conteúdo não suportado, corrompido ou acima dos limites de derivação | Referência íntegra aos bytes originais e motivo de não modelagem | Não inventa um relógio |
+Para um arquivo com `L` bytes:
 
-O decodificador é escolhido por sondagem do conteúdo, sem classificação por extensão. A cobertura de mídia depende do FFmpeg incluído no PyAV e dos layouts numéricos suportados por este projeto. PDFs digitalizados sem texto extraível, planilhas XLSX com células vazias, fórmulas, texto, booleanos ou valores fora dos limites admitidos, documentos sem adaptador e outros conteúdos sem cobertura permanecem como bytes não modelados. Arquivos ZIP genéricos não são tratados como planilhas. Não há OCR, execução de programas ou conversão especulativa para imagens.
+\[
+v=(b_0,\ldots,b_{L-1})\in\{0,\ldots,255\}^{L},\qquad m=\lceil L/1024\rceil.
+\]
 
-Um arquivo pode conter várias modalidades. Trilhas não modeladas aparecem no registro e tornam o resultado `partial`. Formatos de pixels não suportados ou falhas de decodificação deixam o resultado `opaque`, sem publicar uma sequência numérica truncada como se estivesse completa.
+O chunk de índice `j`, começando em zero, tem `r_j = min(1024, L - 1024j)` bytes válidos. Seus 1024 componentes são:
 
-## Executar
+\[
+c_{j,k}=\begin{cases}b_{1024j+k},&k<r_j\\0,&r_j\le k<1024.\end{cases}
+\]
 
-Requer **Python 3.10+ em POSIX**, NumPy, PyAV, pypdf e openpyxl. O exemplo também usa ReportLab para criar seu PDF de teste. O PyAV normalmente fornece FFmpeg em seu wheel; não é necessário chamar o programa `ffmpeg` pela linha de comando.
+O último bloco recebe zeros somente para completar o tamanho fixo. `valid_length = r_j` permite removê-los sem perder zeros que pertencem ao arquivo. A reconstrução concatena os prefixos válidos em ordem de índice e recupera exatamente `v`. Arquivo vazio tem vetor vazio e zero chunks; seu registro continua presente.
 
-```bash
-python -m pip install -r requirements.txt
-python -m input open
-python -m input add /caminho/imagem.png /caminho/audio.wav /caminho/video.mkv
-python -m input add /caminho/arquivo-sem-extensao
-python -m input close
-python -m input status
+Este é o núcleo comum aos quatro exemplos e a qualquer outro formato; a implementação integral está em [`hub.py`](Transformer_Core/Hot_Hub/hub.py):
+
+```python
+from Transformer_Core.Hot_Hub.hub import byte_chunks, marker
+
+with open(filename, "rb") as source:
+    vector = source.read()  # bytes: um vetor imutável de inteiros uint8
+
+for chunk in byte_chunks(vector, marker(canonical_name), source_id):
+    publish(chunk)  # pseudocódigo: o Hot Hub grava cada objeto como uma linha JSON
 ```
 
-`close` informa quantos arquivos foram decodificados, parcialmente modelados ou mantidos como opacos. `HUB_READY` significa que o lote foi preservado e que todos os registros foram publicados; **não significa que todos os formatos foram decodificados**.
+`1_aB7.PDF` recebe o marcador `1_aB7/PDF`. Um arquivo sem extensão recebe `1_aB7/`, com extensão vazia. A barra faz parte de uma string de metadados, nunca do caminho de armazenamento. `source_id` combina a geração e o nome completo; o índice preserva a ordem e mantém chunks repetidos como ocorrências distintas.
 
-Uma nova chamada a `close` retoma uma execução interrompida sem gerar outro ID nem refazer o sorteio. Ela também verifica os originais e os derivados e pode reconstruir dados alterados a partir do Pacote íntegro. Cada diretório de execução aceita um ciclo; escolha outro `MIMIR_RUNTIME_DIR` para um lote independente.
+## Demonstração: quatro formatos, uma saída
 
-## Demonstração reproduzível: quatro formatos, um ciclo
+O gerador [`examples/hot_hub_four_formats.py`](examples/hot_hub_four_formats.py) cria um PDF textual de uma página, áudio WAV sintético de uma rua por cinco segundos, vídeo MKV sintético de uma estrada por cinco segundos e uma planilha XLSX 5×5. As dependências do gerador servem apenas para criar as entradas.
 
-O gerador [`examples/hot_hub_four_formats.py`](examples/hot_hub_four_formats.py) cria entradas **sintéticas**: uma página PDF com uma frase, cinco segundos de áudio PCM que simula ruído de tráfego, cinco segundos de estrada desenhada em vídeo Matroska/FFV1 (50 quadros a 10 fps) e uma aba XLSX de 5 linhas por 5 colunas, preenchida de 1 a 25. São dados de teste, não uma gravação nem uma filmagem reais.
+| Antes | Depois, pelo mesmo algoritmo |
+| --- | --- |
+| PDF de uma página | Bytes completos do PDF → vetor → chunks de 1024; marcador `X_ID/pdf` |
+| Áudio WAV de 5 segundos | Bytes completos do WAV → vetor → chunks de 1024; marcador `X_ID/wav` |
+| Vídeo MKV de 5 segundos | Bytes completos do MKV → vetor → chunks de 1024; marcador `X_ID/mkv` |
+| Planilha XLSX de 5×5 células | Bytes completos do XLSX → vetor → chunks de 1024; marcador `X_ID/xlsx` |
 
-**Matemática comum.** Cada fonte gera campos amostrados `F:D×T→ℝᶜ`, com domínio e relógio declarados. Para duas amostras comparáveis, o código usa `ΔF=F₂−F₁` e `taxa=ΔF/(t₂−t₁)`. Não inventa tempo para o eixo de bytes nem trajetória física a partir de pixels. Aqui as especializações são:
-
-| Fonte | Campo amostrado | Coordenadas e operação |
-| --- | --- | --- |
-| PDF textual | `F(i)=ord(caractere_i)` | `i` é o índice no texto extraído da página; instantâneo estático, variação temporal zero. |
-| Rua (WAV, 5 s) | `F(n,c)=amostra PCM` | `t_n=n/8000 s`; diferenças sucessivas em cada canal e taxa média `ΔF/(1/8000 s)`. |
-| Estrada (MKV, 5 s) | `F(k,y,x)=valor cinza do quadro` | `t_k=k/10 s`; diferença entre quadros na mesma posição da grade e taxa média `ΔF/(1/10 s)`. |
-| Planilha (XLSX, 5×5) | `F(r,c)=valor numérico da célula` | Linha e coluna são eixos espaciais discretos; instantâneo estático, sem relógio de eventos. |
-
-**Mesmo script de processamento para os quatro arquivos**, sem `if` por extensão ou tipo de mídia. Os adaptadores são parte do Hot Hub e são escolhidos pelo conteúdo; [`calculus.py`](Transformer_Core/Fields/calculus.py) implementa a diferença e a taxa usadas para as trilhas temporais. O bloco imprime o estado e os eixos/formatos dos campos; os nomes temporários e hashes mudam em cada execução.
+O número de chunks é calculado a partir do tamanho real do arquivo, incluindo seu contêiner. Células, páginas, quadros e amostras de áudio não determinam fronteiras de chunks.
 
 ```python
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
 from BN1_1.Pacote.cache import Pacote
+from Transformer_Core.Hot_Hub.hub import HotHub
 from examples.hot_hub_four_formats import create_examples
 
 with TemporaryDirectory() as directory:
     base = Path(directory)
-    files = create_examples(base / "inputs")
+    sources = create_examples(base / "inputs")
+    originals = {p.name: p.read_bytes() for p in sources}
     pacote = Pacote(base / "runtime")
     pacote.open()
-    pacote.add(files)          # os quatro seguem a mesma chamada
-    pacote.close()             # publica os campos e preserva os originais
-
-    hub = base / "runtime/Transformer_Core/Hot_Hub"
-    manifest = json.loads((hub / "fields.json").read_text())
-    print(manifest["summary"])
-    for relative in manifest["records"].values():
-        record = json.loads((hub / "representations" /
-                             manifest["generation"] / relative).read_text())
-        for field in record["fields"]:
-            print(record["adapter"], record["status"], field["axes"],
-                  field["chunks"][0]["samples"]["shape"], len(field["chunks"]))
+    pacote.add(sources)
+    pacote.close()
+    hub = HotHub(base / "runtime")
+    manifest = json.loads(hub.manifest.read_text())
+    state = json.loads(pacote.state_file.read_text())
+    for item in state["items"]:
+        name = item["renamed"]
+        restored = hub.reconstruct(name, manifest["sources"])
+        assert restored == originals[item["name"]]
+        print(item["name"], "→", len(restored), "bytes →",
+              (len(restored) + 1023) // 1024, "chunks de 1024")
 ```
 
-**Antes → depois**, observado com o gerador e o script acima (`decoded=4, partial=0, opaque=0`):
+A demonstração verifica a reconstrução **byte a byte** dos quatro arquivos. Todo conteúdo usa o mesmo esquema. A interpretação semântica fica para uma etapa futura.
 
-| Antes: arquivo de entrada | Depois: campo publicado no Hot Hub |
-| --- | --- |
-| `nota.pdf`: 1 página, “Relato: a rua tem carros e pedestres.” | `pypdf`, `decoded`; `page_1_text`, eixo `[codepoint]`, vetor de 38 inteiros Unicode. A reconstrução do vetor produz a frase e uma quebra de linha final. |
-| `rua.wav`: mono PCM 16 bits, 8.000 amostras/s × 5 s | `pyav`, `decoded`; eixo `[sample, channel]`, 40.000 amostras em 79 blocos. `step=[1,8000]`; o primeiro bloco tem forma `[512,1]` e começa em `[0,1]` s. |
-| `estrada.mkv`: 50 quadros de uma estrada desenhada, 10 fps × 5 s | `pyav`, `decoded`; eixo `[y,x]`, 50 blocos de `[24,32]`. Primeiro PTS `[0,1]` s, último `[49,10]` s, intervalo sucessivo `[1,10]` s. |
-| `medidas.xlsx`: aba `Medidas`, 5×5 números de 1 a 25 | `openpyxl`, `decoded`; `sheet_1`, eixos `[row,column]`, array `[5,5]`, primeira linha `[1,2,3,4,5]` e última `[21,22,23,24,25]`. |
+## Executar
 
-Cada registro conserva a referência ao original e seu SHA-256. A matemática do campo é compartilhada; **a extração dos bytes requer um adaptador por codificação**. O exemplo mostra quatro codificações cobertas, não uma conversão sem decodificadores de qualquer arquivo. O texto do PDF não traz coordenadas confiáveis, a planilha só aceita grades numéricas no adaptador atual, o áudio não é transcrito e o vídeo não identifica veículos ou movimento de objetos.
+Requer **Python 3.10+ em POSIX**, somente a biblioteca padrão para o pipeline:
 
-## Dados e integridade
+```bash
+python -m input open
+python -m input add /caminho/documento.pdf /caminho/audio.wav
+python -m input add /caminho/video.mkv /caminho/planilha.xlsx
+python -m input close
+python -m input status
+```
+
+`close` informa arquivos, bytes e chunks. `HUB_READY` significa que o conjunto completo foi publicado e verificado. Repetir `close` verifica o resultado; uma interrupção ou corrupção pode ser reparada a partir do Pacote íntegro, sem outro ID do Namer. A geração de armazenamento pode mudar na reparação.
+
+Python mantém a comunicação direta com Pacote, Namer, BBN1_1 e CLI. `bytes` já fornece a representação compacta e exata de um vetor de bytes; não é necessário introduzir NumPy, FFI ou outro processo. JSON Lines permite que etapas escritas em outras linguagens consumam o mesmo contrato. Esta escolha prioriza integração e auditabilidade; não resulta de um benchmark entre linguagens.
+
+## Armazenamento e compatibilidade
 
 | Local no diretório de execução | Conteúdo |
 | --- | --- |
-| `cycle.json` | Estado do ciclo, associação dos nomes e resumo das representações |
-| `BN1_1/Pacote/files/<entrada>/<nome>` | Primeiro conjunto de originais |
-| `BN1_1/Namer/` | Mensagem contendo apenas `n` e resposta com os stems |
-| `BN1_1/BBN1_1/<nome>` | Cópias intermediárias; removidas após confirmação |
-| `Transformer_Core/Hot_Hub/data/<nome>` | Segundo conjunto de originais, em uma pasta plana |
-| `Transformer_Core/Hot_Hub/manifest.json` | Inventário e SHA-256 dos originais |
-| `Transformer_Core/Hot_Hub/representations/<geração>/<objeto>/` | Registro JSON e arrays `.npy`; divisão por identidade, nunca por formato |
-| `Transformer_Core/Hot_Hub/fields.json` | Geração publicada, proveniência, inventário dos derivados e contagens |
+| `cycle.json` | Estado do ciclo, nomes e resumo |
+| `BN1_1/Pacote/files/<entrada>/<nome>` | Originais preservados |
+| `BN1_1/Namer/` | Quantidade `n` e stems |
+| `BN1_1/BBN1_1/<nome>` | Bytes intermediários; liberados após verificação |
+| `Transformer_Core/Hot_Hub/generations/<geração>/<posição>.jsonl` | Um cabeçalho de arquivo seguido de seus chunks |
+| `Transformer_Core/Hot_Hub/manifest.jsonl` | Uma linha JSON: geração ativa, inventário, hashes e resumo |
 
-O diretório padrão é `.mimir-runtime/`, ignorado pelo Git. JSON descreve os contratos; arquivos `.npy` armazenam arrays sem pickle. Os arquivos originais continuam sendo arquivos binários, preservados byte a byte. Não há necessidade de um banco SQL ou YAML de extensões.
+Todos os arquivos de saída do Hot Hub usam `.jsonl`. Não há cópias em PDF, WAV, MKV ou XLSX dentro do novo Hot Hub. Os originais continuam no Pacote. O manifesto associa o nome original renomeado ao registro e impede associação por mera posição ou por extensão.
 
-A geração é publicada por último, após a gravação dos registros e arrays. Uma falha de escrita impede a conclusão e a limpeza do BBN1_1. Gerações anteriores ou órfãs de uma interrupção podem permanecer no armazenamento; somente a apontada por `fields.json` está ativa. Não existe coleta automática desses derivados nesta versão.
-
-A garantia de preservação refere-se aos originais. Os campos retêm as amostras produzidas pelo decodificador, com metadados de precisão; não substituem todos os metadados, estruturas e comportamentos do arquivo original. Diferenças de inteiros de até 32 bits usam `int64`; diferenças e taxas em ponto flutuante estão sujeitas a arredondamento. Nenhuma interpretação visual, semântica ou trajetória é inferida automaticamente.
-
-## Compatibilidade e limites
-
-- O layout atual é a versão 2. Ciclos anteriores são recusados antes de alterar o estado ou os arquivos. Preserve-os e reenvie seus originais para outro `MIMIR_RUNTIME_DIR`; não há migração automática.
-- Os limites padrão por arquivo são 32 milhões de elementos por array, 1 GiB de arrays derivados e 100 mil quadros/blocos por trilha. Ao atingir um limite, o arquivo fica opaco, com motivo registrado, e os originais são preservados. `FieldStore(..., limits=Limits(...))` permite ajustar esses valores pela API Python.
-- Os limites controlam a publicação de derivados; não constituem um sandbox nem garantem um teto rígido de memória dentro dos decodificadores nativos. O processamento mantém um quadro/bloco e seu predecessor por campo, em vez de carregar o vídeo inteiro.
-- Não há expiração automática do Pacote nem encerramento final do ciclo. A limpeza controlada do BBN1_1 conserva dois conjuntos íntegros; não é uma garantia contra falha simultânea do dispositivo físico.
+- **Layout 3:** ciclos de versões anteriores são recusados sem migração nem exclusão. Use outro `MIMIR_RUNTIME_DIR` e reenvie os originais.
+- Cada diretório de execução aceita um ciclo. A entrada pública mantém bloqueio exclusivo; chamadas diretas a `HotHub.build` devem ser serializadas pelo chamador.
+- O vetor inteiro de um arquivo é carregado na memória, como definido nesta fase: memória `O(L + 1024)`. Arquivos maiores que a memória disponível precisam de uma futura extensão do contrato. A verificação percorre chunks individualmente.
+- A serialização decimal JSON ocupa mais espaço que os bytes originais; não é compressão. Não há perda de precisão: cada componente é um inteiro de 0 a 255.
+- Somente a geração indicada pelo manifesto está ativa. Gerações anteriores e gravações interrompidas podem permanecer; não há coleta automática nesta fase.
+- O Pacote só poderá ser apagado em uma etapa futura de confirmação final. A limpeza atual do BBN1_1 não promete apagamento físico irrecuperável.
 
 ## Verificação
 
 ```bash
+# Apenas para gerar PDF/WAV/MKV/XLSX usados na demonstração e nos testes:
+python -m pip install -r requirements-demo.txt
 python -m compileall -q input BN1_1 Transformer_Core examples tests
 python -m unittest discover -s tests -v
 ```
 
-A CI executa as regressões em Python 3.10 e 3.12. Os testes cobrem armazenamento plano, concorrência, identidade estável, recuperação, integridade, imagens RGB e cinza de 16 bits, áudio estéreo, vídeo com intervalos variáveis, múltiplas trilhas, gradientes, tensores, entradas opacas e publicação interrompida.
-
-O [contrato técnico](docs/temporal-fields.md) explica a formulação matemática, as diferenças entre variação e movimento e como ler os resultados.
+A CI executa toda a suíte em Python 3.10 e 3.12. Os testes cobrem limites de 1024, todos os 256 valores de byte, arquivo e lote vazios, padding, repetição, separação de arquivos e lotes, corrupção, ordem, mistura, publicação interrompida, recuperação, CLI, concorrência, preservação de versões antigas e os quatro formatos reais de teste.
