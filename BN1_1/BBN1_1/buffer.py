@@ -53,7 +53,7 @@ class BBN1_1:
         self, expected: dict[str, str], hub: HotHub,
         verify_pacote: Callable[[], dict[str, str]],
     ) -> None:
-        """Drop BBN bytes only while two complete verified copies exist."""
+        """Drop BBN bytes only while Pacote bytes and lossless Hub chunks are verified."""
         hub.verify(expected)
         if verify_pacote() != expected:
             raise BufferError("A segunda cópia no Pacote não está íntegra.")
@@ -72,3 +72,4 @@ class BBN1_1:
             ):
                 directory.rmdir()
             self.root.rmdir()
+

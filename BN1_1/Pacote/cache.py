@@ -75,10 +75,10 @@ class Pacote:
             raise CacheError("Nenhum ciclo válido. Execute 'open' primeiro.") from exc
         if state.get("status") not in (
             "OPEN", "CLOSED", "NAMING", "NAMED", "STAGED",
-            "MIRRORING", "HUB_VERIFIED", "HUB_READY",
+            "CHUNKING", "HUB_VERIFIED", "HUB_READY",
         ) or not isinstance(state.get("items"), list):
             raise CacheError("Estado do ciclo inválido.")
-        if state.get("layout_version") != 2:
+        if state.get("layout_version") != 3:
             raise CacheError("Ciclo do layout antigo preservado. Use outro MIMIR_RUNTIME_DIR e reenvie os originais; migração automática não é suportada.")
         return state
 
@@ -90,7 +90,7 @@ class Pacote:
             self.namer_inbox.mkdir(mode=0o700, parents=True, exist_ok=True)
             if any(self.files.iterdir()) or any(self.namer_inbox.iterdir()):
                 raise CacheError("Há dados de um início incompleto; escolha outro diretório de execução.")
-            _write_json(self.state_file, {"layout_version": 2, "status": "OPEN", "items": []})
+            _write_json(self.state_file, {"layout_version": 3, "status": "OPEN", "items": []})
 
     def add(self, paths: list[Path]) -> int:
         if not paths:
@@ -154,7 +154,7 @@ class Pacote:
                 raise CacheError("Entrada do cache inválida.")
             children = list(directory.iterdir())
             expected = {item["renamed"]} if state["status"] in (
-                "NAMED", "STAGED", "MIRRORING", "HUB_VERIFIED", "HUB_READY"
+                "NAMED", "STAGED", "CHUNKING", "HUB_VERIFIED", "HUB_READY"
             ) else {item["name"]}
             if state["status"] == "NAMING":
                 expected.add(item["renamed"])
@@ -181,7 +181,7 @@ class Pacote:
             state["status"] = "NAMING"
             _write_json(self.state_file, state)
 
-        if state["status"] in ("NAMED", "STAGED", "MIRRORING", "HUB_VERIFIED", "HUB_READY"):
+        if state["status"] in ("NAMED", "STAGED", "CHUNKING", "HUB_VERIFIED", "HUB_READY"):
             assigned_stems = {
                 item["renamed"][:-len(Path(item["name"]).suffix)]
                 if Path(item["name"]).suffix else item["renamed"]
@@ -215,7 +215,7 @@ class Pacote:
         state = self._state()
         matches = [item for item in state["items"] if item.get("renamed") == filename]
         if len(matches) != 1 or state["status"] not in (
-            "NAMED", "STAGED", "MIRRORING", "HUB_VERIFIED", "HUB_READY"
+            "NAMED", "STAGED", "CHUNKING", "HUB_VERIFIED", "HUB_READY"
         ):
             raise CacheError("Arquivo requisitado pelo BBN1_1 não está disponível.")
         source = self.files / matches[0]["entry"] / filename
@@ -234,8 +234,8 @@ class Pacote:
             raise CacheError("O conteúdo no Pacote mudou desde a entrada.")
         return hashlib.sha256(filename.encode("utf-8")).hexdigest(), content_hash.hexdigest()
 
-    def _expected_mirror(self, state: dict) -> dict[str, str]:
-        """Verify the Pacote copy and describe the exact mirrored file tree."""
+    def _expected_sources(self, state: dict) -> dict[str, str]:
+        """Verify the Pacote copy and describe the exact source inventory."""
         expected = {}
         for item in state["items"]:
             filename = item["renamed"]
@@ -255,11 +255,10 @@ class Pacote:
             self._recover_open(state)
             n = self._count(state)
             if state["status"] == "HUB_READY":
-                expected = self._expected_mirror(state)
+                expected = self._expected_sources(state)
                 try:
                     hub = HotHub(self.runtime)
-                    hub.verify(expected)
-                    state["representations"] = hub.normalize(expected)["summary"]
+                    state["representations"] = hub.verify(expected)["summary"]
                     _write_json(self.state_file, state)
                     return n
                 except HubError:
@@ -286,17 +285,16 @@ class Pacote:
             if state["status"] != "STAGED":
                 state["status"] = "STAGED"
                 _write_json(self.state_file, state)
-            expected = self._expected_mirror(state)
+            expected = self._expected_sources(state)
             hub = HotHub(self.runtime)
             bbn = BBN1_1(self.runtime)
-            state["status"] = "MIRRORING"
+            state["status"] = "CHUNKING"
             _write_json(self.state_file, state)
-            if hub.mirror(bbn.root, expected) != n:
-                raise CacheError("O Hot Hub não recebeu o lote completo.")
+            manifest = hub.build(bbn.root, expected)
             state["status"] = "HUB_VERIFIED"
             _write_json(self.state_file, state)
-            state["representations"] = hub.normalize(expected)["summary"]
-            bbn.purge_verified(expected, hub, lambda: self._expected_mirror(state))
+            state["representations"] = manifest["summary"]
+            bbn.purge_verified(expected, hub, lambda: self._expected_sources(state))
             state["status"] = "HUB_READY"
             _write_json(self.state_file, state)
             return n
@@ -308,3 +306,4 @@ class Pacote:
             if "representations" in state:
                 result["representations"] = state["representations"]
             return result
+

@@ -1,1 +1,1 @@
-"""First mirrored storage boundary after BN1_1."""
+"""Byte-vector processing boundary after BN1_1."""

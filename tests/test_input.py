@@ -112,10 +112,12 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("add", *(self.base / name for name in names))
         self.run_cli("close")
         state = json.loads((self.runtime / "cycle.json").read_text())
-        folder = self.runtime / "Transformer_Core/Hot_Hub/data"
-        self.assertEqual({p.name for p in folder.iterdir()}, {x["renamed"] for x in state["items"]})
-        self.assertTrue(all(p.is_file() for p in folder.iterdir()))
-        self.assertEqual(sorted(p.read_bytes() for p in folder.iterdir()), sorted(n.encode() for n in names))
+        hub = HotHub(self.runtime)
+        expected = {item["renamed"]: item["sha256_content"] for item in state["items"]}
+        manifest = hub.verify(expected)
+        self.assertEqual(set(manifest["records"]), set(expected))
+        self.assertEqual(sorted(hub.reconstruct(name, expected) for name in expected), sorted(n.encode() for n in names))
+        self.assertFalse((hub.root / "data").exists())
         self.assertFalse((self.runtime / "BN1_1/BBN1_1").exists())
         self.assertFalse((self.runtime / "BN1_1/Sorter").exists())
         self.assertEqual(state["status"], "HUB_READY")
@@ -140,8 +142,10 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("open")
         self.run_cli("add", second)
         self.run_cli("close")
-        second_folder = self.base / "second-cycle/Transformer_Core/Hot_Hub/data"
-        self.assertEqual(len(list(second_folder.iterdir())), 1)
+        second_hub = HotHub(self.base / "second-cycle")
+        manifest = json.loads(second_hub.manifest.read_text())
+        self.assertEqual(len(manifest["records"]), 1)
+        self.assertEqual(second_hub.reconstruct(next(iter(manifest["sources"])), manifest["sources"]), b"second")
         self.assertFalse((self.base / "persistent").exists())
 
     def test_changed_cached_bytes_are_refused_and_incomplete_add_is_recovered(self):
@@ -167,20 +171,22 @@ class InputFlowTest(unittest.TestCase):
         relative = "1_aB7.pdf"
         expected = {relative: hashlib.sha256(b"verified").hexdigest()}
         hub = HotHub(self.runtime)
-        hub.mirror(bbn.root, expected)
+        hub.build(bbn.root, expected)
 
         with self.assertRaises(BufferError):
             bbn.purge_verified(expected, hub, lambda: {})
         self.assertTrue(original.exists())
-        (hub.data / relative).write_bytes(b"corrupted")
+        manifest = hub.verify(expected)
+        record = hub.generations / manifest["generation"] / manifest["records"][relative]["file"]
+        record.write_bytes(b"corrupted")
         with self.assertRaises(HubError):
             bbn.purge_verified(expected, hub, lambda: expected)
         self.assertTrue(original.exists())
 
-        hub.mirror(bbn.root, expected)
+        hub.build(bbn.root, expected)
         bbn.purge_verified(expected, hub, lambda: expected)
         self.assertFalse(bbn.root.exists())
-        self.assertEqual((hub.data / relative).read_bytes(), b"verified")
+        self.assertEqual(hub.reconstruct(relative, expected), b"verified")
 
     def test_interrupted_bbn_cleanup_can_restart_from_pacote(self):
         source = self.base / "sample.md"
@@ -196,12 +202,16 @@ class InputFlowTest(unittest.TestCase):
         self.assertFalse((self.runtime / "BN1_1/BBN1_1").exists())
         self.assertEqual(json.loads(state_path.read_text())["status"], "HUB_READY")
 
-        mirrored = next((self.runtime / "Transformer_Core/Hot_Hub/data").rglob("*.md"))
-        mirrored.write_bytes(b"damage")
+        hub = HotHub(self.runtime)
+        manifest = json.loads(hub.manifest.read_text())
+        name = next(iter(manifest["sources"]))
+        record = hub.generations / manifest["generation"] / manifest["records"][name]["file"]
+        record.write_bytes(b"damage")
         self.run_cli("close")
-        self.assertEqual(mirrored.read_bytes(), b"document")
+        self.assertEqual(hub.reconstruct(name, manifest["sources"]), b"document")
         self.assertEqual(json.loads(state_path.read_text())["status"], "HUB_READY")
 
 
 if __name__ == "__main__":
     unittest.main()
+

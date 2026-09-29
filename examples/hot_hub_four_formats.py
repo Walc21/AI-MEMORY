@@ -1,6 +1,7 @@
 """Generate four synthetic, reproducible inputs for the README demonstration.
 
-Requires project requirements and reportlab: pip install reportlab
+Optional fixture dependencies: pip install -r requirements-demo.txt
+The Hot Hub itself imports none of these format-specific libraries.
 """
 
 from fractions import Fraction
@@ -64,3 +65,4 @@ def create_examples(folder: Path) -> list[Path]:
 if __name__ == "__main__":
     for path in create_examples(Path("examples/generated")):
         print(path)
+
