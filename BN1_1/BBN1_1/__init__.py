@@ -1,1 +1,1 @@
-"""Buffer organized by extension after Sorter metadata classification."""
+"""Flat staging buffer with verified file transfer."""

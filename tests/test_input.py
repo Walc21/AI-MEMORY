@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from BN1_1.BBN1_1.buffer import BBN1_1, BufferError
-from BN1_1.Sorter.sorter import Sorter, SorterError
+from BN1_1.contracts import validate_names
 from Transformer_Core.Hot_Hub.hub import HotHub, HubError
 
 
@@ -104,35 +104,31 @@ class InputFlowTest(unittest.TestCase):
         self.assertEqual(json.loads((self.runtime / "BN1_1/Namer/outbox/stems.json").read_text())["stems"], stems)
         self.assertEqual(json.loads(state_path.read_text())["status"], "HUB_READY")
 
-    def test_sorter_and_hub_preserve_case_and_last_suffix(self):
+    def test_hub_is_flat_for_all_extensions_and_no_extension(self):
         names = ["a.pdf", "b.pdf", "c.PDF", "archive.tar.gz", "plain"]
         for name in names:
             (self.base / name).write_bytes(name.encode())
         self.run_cli("open")
         self.run_cli("add", *(self.base / name for name in names))
         self.run_cli("close")
-
         state = json.loads((self.runtime / "cycle.json").read_text())
-        groups = Sorter.classify([item["renamed"] for item in state["items"]])
-        self.assertEqual(set(groups), {"pdf", "PDF", "gz", ""})
-        for extension in ["pdf", "PDF", "gz", ""]:
-            self.assertEqual(len(groups[extension]), 2 if extension == "pdf" else 1)
-            folder = self.runtime / "Transformer_Core/Hot_Hub/data" / (f"by_extension/{extension}" if extension else "no_extension")
-            self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(groups[extension]))
-        contents = [p.read_bytes() for p in (self.runtime / "Transformer_Core/Hot_Hub/data").rglob("*") if p.is_file()]
-        self.assertEqual(sorted(contents), sorted(name.encode() for name in names))
+        folder = self.runtime / "Transformer_Core/Hot_Hub/data"
+        self.assertEqual({p.name for p in folder.iterdir()}, {x["renamed"] for x in state["items"]})
+        self.assertTrue(all(p.is_file() for p in folder.iterdir()))
+        self.assertEqual(sorted(p.read_bytes() for p in folder.iterdir()), sorted(n.encode() for n in names))
         self.assertFalse((self.runtime / "BN1_1/BBN1_1").exists())
-        self.assertEqual(json.loads((self.runtime / "cycle.json").read_text())["status"], "HUB_READY")
+        self.assertFalse((self.runtime / "BN1_1/Sorter").exists())
+        self.assertEqual(state["status"], "HUB_READY")
 
-    def test_sorter_rejects_invalid_or_repeated_names(self):
-        with self.assertRaises(SorterError):
-            Sorter.classify(["sample.pdf"])
-        with self.assertRaises(SorterError):
-            Sorter.classify(["1_aB7.pdf", "1_aB7.pdf"])
-        with self.assertRaises(SorterError):
-            Sorter.classify(["../1_aB7.pdf"])
+    def test_flat_name_contract_rejects_invalid_or_repeated_names(self):
+        with self.assertRaises(ValueError):
+            validate_names(["sample.pdf"])
+        with self.assertRaises(ValueError):
+            validate_names(["1_aB7.pdf", "1_aB7.pdf"])
+        with self.assertRaises(ValueError):
+            validate_names(["../1_aB7.pdf"])
 
-    def test_separate_cycles_classify_same_extension_without_registry(self):
+    def test_separate_cycles_preserve_independent_flat_data(self):
         first = self.base / "first.pdf"
         first.write_bytes(b"first")
         self.run_cli("open")
@@ -144,7 +140,7 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("open")
         self.run_cli("add", second)
         self.run_cli("close")
-        second_folder = self.base / "second-cycle/Transformer_Core/Hot_Hub/data/by_extension/pdf"
+        second_folder = self.base / "second-cycle/Transformer_Core/Hot_Hub/data"
         self.assertEqual(len(list(second_folder.iterdir())), 1)
         self.assertFalse((self.base / "persistent").exists())
 
@@ -160,15 +156,15 @@ class InputFlowTest(unittest.TestCase):
         cached.write_bytes(b"altered!")
         self.run_cli("close", expected=1)
         self.assertFalse(orphan.exists())
-        folder = self.runtime / "BN1_1/BBN1_1/by_extension/txt"
+        folder = self.runtime / "BN1_1/BBN1_1"
         self.assertFalse(folder.exists() and any(folder.iterdir()))
 
     def test_bbn_cleanup_requires_both_hub_and_pacote_copies(self):
         bbn = BBN1_1(self.runtime)
-        original = bbn.root / "by_extension" / "pdf" / "1_aB7.pdf"
+        original = bbn.root / "1_aB7.pdf"
         original.parent.mkdir(parents=True)
         original.write_bytes(b"verified")
-        relative = "by_extension/pdf/1_aB7.pdf"
+        relative = "1_aB7.pdf"
         expected = {relative: hashlib.sha256(b"verified").hexdigest()}
         hub = HotHub(self.runtime)
         hub.mirror(bbn.root, expected)
