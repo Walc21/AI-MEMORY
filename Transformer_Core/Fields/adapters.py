@@ -1,9 +1,14 @@
 """Decode content into native sampled fields, never route by filename suffix."""
 
 from fractions import Fraction
+from zipfile import BadZipFile, ZipFile
 
 import av
 import numpy as np
+from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 
 from .calculus import difference, numeric
 
@@ -66,9 +71,91 @@ def video_planes(frame):
     return arrays
 
 
+def decode_pdf(incoming, writer):
+    """Text code points per page; no OCR or inferred coordinates."""
+    try:
+        reader = PdfReader(incoming)
+        if reader.is_encrypted:
+            raise Unmodeled("encrypted_pdf")
+        if len(reader.pages) > writer.max_frames:
+            raise Unmodeled("page_limit")
+        fields = []
+        for index, page in enumerate(reader.pages):
+            text = page.extract_text() or ""
+            if len(text) > writer.max_elements:
+                raise Unmodeled("array_limit")
+            values = np.fromiter((ord(char) for char in text), dtype=np.int32, count=len(text))
+            fields.append({"id": f"page_{index + 1}_text", "axes": ["codepoint"],
+                           "value_unit": "unicode_codepoint", "page": index + 1,
+                           "time": {"kind": "static"}, "chunks": [
+                               {"samples": writer.array(values),
+                                "temporal": {"kind": "constant", "rate": 0}}]})
+        if not any(field["chunks"][0]["samples"]["shape"][0] for field in fields):
+            raise Unmodeled("no_extractable_pdf_text")
+        return {"adapter": "pypdf", "status": "decoded", "unmodeled_streams": [],
+                "fields": fields}
+    except (PdfReadError, OSError, KeyError, TypeError) as exc:
+        raise Unmodeled("invalid_pdf") from exc
+
+
+def decode_xlsx(incoming, writer):
+    """Numeric cell grids; reject formulas and other cell types explicitly."""
+    try:
+        with ZipFile(incoming) as archive:
+            names = set(archive.namelist())
+            if not {"[Content_Types].xml", "xl/workbook.xml"}.issubset(names):
+                raise Unmodeled("unsupported_zip_container")
+            if (len(names) > 1000 or
+                    sum(info.file_size for info in archive.infolist()) > 64 * 1024 * 1024):
+                raise Unmodeled("xlsx_uncompressed_limit")
+        incoming.seek(0)
+        book = load_workbook(incoming, read_only=True, data_only=False, keep_links=False)
+        try:
+            if len(book.worksheets) > writer.max_frames:
+                raise Unmodeled("sheet_limit")
+            fields = []
+            for index, sheet in enumerate(book.worksheets):
+                rows, cols = sheet.max_row or 0, sheet.max_column or 0
+                if rows * cols > writer.max_elements:
+                    raise Unmodeled("array_limit")
+                if not rows or not cols:
+                    continue
+                values = np.empty((rows, cols), dtype=np.float64)
+                for row in sheet.iter_rows():
+                    for cell in row:
+                        value = cell.value
+                        if (cell.data_type == "f" or isinstance(value, bool) or
+                                not isinstance(value, (int, float)) or
+                                not np.isfinite(value)):
+                            raise Unmodeled("non_numeric_xlsx_cell")
+                        if isinstance(value, int) and abs(value) > 2**53:
+                            raise Unmodeled("xlsx_integer_precision_limit")
+                        values[cell.row - 1, cell.column - 1] = value
+                fields.append({"id": f"sheet_{index + 1}", "axes": ["row", "column"],
+                               "value_unit": "cell_number", "sheet": sheet.title,
+                               "time": {"kind": "static"}, "chunks": [
+                                   {"samples": writer.array(values),
+                                    "temporal": {"kind": "constant", "rate": 0}}]})
+            if not fields:
+                raise Unmodeled("empty_xlsx")
+            return {"adapter": "openpyxl", "status": "decoded",
+                    "unmodeled_streams": [], "fields": fields}
+        finally:
+            book.close()
+    except (BadZipFile, InvalidFileException, OSError, KeyError, ValueError, TypeError) as exc:
+        raise Unmodeled("invalid_xlsx") from exc
+
+
 def decode(source, writer):
     with source.open("rb") as incoming:
-        if incoming.read(6) == b"\x93NUMPY":
+        header = incoming.read(6)
+        if header.startswith(b"%PDF-"):
+            incoming.seek(0)
+            return decode_pdf(incoming, writer)
+        if header.startswith(b"PK"):
+            incoming.seek(0)
+            return decode_xlsx(incoming, writer)
+        if header == b"\x93NUMPY":
             array = np.load(source, mmap_mode="r", allow_pickle=False)
             if array.size > writer.max_elements:
                 raise Unmodeled("array_limit")
