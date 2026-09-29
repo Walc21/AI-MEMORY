@@ -273,7 +273,7 @@ class Pacote:
             except (NamerError, ValueError, TypeError) as exc:
                 raise CacheError(str(exc)) from exc
             self._rename(state, stems)
-            sorter = Sorter(self.runtime)
+            sorter = Sorter()
             try:
                 groups = sorter.classify([item["renamed"] for item in state["items"]])
                 stored = BBN1_1(self.runtime).store(groups, sorter, self)

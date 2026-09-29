@@ -1,4 +1,5 @@
 .mimir-runtime/
+# Preserve ignored registry files created by earlier versions.
 .mimir-state/
 *.sqlite3-wal
 *.sqlite3-shm

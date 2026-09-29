@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -9,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from BN1_1.BBN1_1.buffer import BBN1_1, BufferError
+from BN1_1.Sorter.sorter import Sorter, SorterError
 from Transformer_Core.Hot_Hub.hub import HotHub, HubError
 
 
@@ -21,9 +21,7 @@ class InputFlowTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.runtime = self.base / "runtime"
-        self.registry_db = self.base / "persistent" / "extensions.sqlite3"
-        self.env = {**os.environ, "MIMIR_RUNTIME_DIR": str(self.runtime),
-                    "MIMIR_REGISTRY_DB": str(self.registry_db)}
+        self.env = {**os.environ, "MIMIR_RUNTIME_DIR": str(self.runtime)}
 
     def run_cli(self, *args, expected=0):
         result = subprocess.run(
@@ -106,7 +104,7 @@ class InputFlowTest(unittest.TestCase):
         self.assertEqual(json.loads((self.runtime / "BN1_1/Namer/outbox/stems.json").read_text())["stems"], stems)
         self.assertEqual(json.loads(state_path.read_text())["status"], "HUB_READY")
 
-    def test_sorter_registry_and_hub_preserve_case_and_last_suffix(self):
+    def test_sorter_and_hub_preserve_case_and_last_suffix(self):
         names = ["a.pdf", "b.pdf", "c.PDF", "archive.tar.gz", "plain"]
         for name in names:
             (self.base / name).write_bytes(name.encode())
@@ -114,39 +112,27 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("add", *(self.base / name for name in names))
         self.run_cli("close")
 
-        with sqlite3.connect(self.registry_db) as connection:
-            registry = dict(connection.execute("SELECT idd, extension FROM extension_registry"))
+        state = json.loads((self.runtime / "cycle.json").read_text())
+        groups = Sorter.classify([item["renamed"] for item in state["items"]])
+        self.assertEqual(set(groups), {"pdf", "PDF", "gz", ""})
         for extension in ["pdf", "PDF", "gz", ""]:
-            digest = hashlib.sha256(extension.encode()).hexdigest()
-            self.assertEqual(registry[digest], extension)
-            partition = json.loads((self.runtime / "BN1_1/Sorter/partitions" / digest / "names.json").read_text())
-            self.assertEqual(partition["idd"], digest)
-            self.assertEqual(len(partition["filenames"]), 2 if extension == "pdf" else 1)
+            self.assertEqual(len(groups[extension]), 2 if extension == "pdf" else 1)
             folder = self.runtime / "Transformer_Core/Hot_Hub/data" / (f"by_extension/{extension}" if extension else "no_extension")
-            self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(partition["filenames"]))
+            self.assertEqual(sorted(p.name for p in folder.iterdir()), sorted(groups[extension]))
         contents = [p.read_bytes() for p in (self.runtime / "Transformer_Core/Hot_Hub/data").rglob("*") if p.is_file()]
         self.assertEqual(sorted(contents), sorted(name.encode() for name in names))
         self.assertFalse((self.runtime / "BN1_1/BBN1_1").exists())
         self.assertEqual(json.loads((self.runtime / "cycle.json").read_text())["status"], "HUB_READY")
 
-    def test_sorter_rejects_hash_inconsistency_without_touching_cached_bytes(self):
-        source = self.base / "sample.pdf"
-        source.write_bytes(b"payload")
-        self.run_cli("open")
-        self.run_cli("add", source)
-        self.run_cli("close")
-        with sqlite3.connect(self.registry_db) as connection:
-            connection.execute("UPDATE extension_registry SET extension = ? WHERE idd = ?",
-                               ("other", hashlib.sha256(b"pdf").hexdigest()))
-        state_path = self.runtime / "cycle.json"
-        state = json.loads(state_path.read_text())
-        state["status"] = "STAGED"  # Recreate the point before the hub handoff.
-        state_path.write_text(json.dumps(state))
-        self.run_cli("close", expected=1)
-        cached = next((self.runtime / "BN1_1/Pacote/files").glob("*/*"))
-        self.assertEqual(cached.read_bytes(), b"payload")
+    def test_sorter_rejects_invalid_or_repeated_names(self):
+        with self.assertRaises(SorterError):
+            Sorter.classify(["sample.pdf"])
+        with self.assertRaises(SorterError):
+            Sorter.classify(["1_aB7.pdf", "1_aB7.pdf"])
+        with self.assertRaises(SorterError):
+            Sorter.classify(["../1_aB7.pdf"])
 
-    def test_registry_is_shared_across_separate_cycle_directories(self):
+    def test_separate_cycles_classify_same_extension_without_registry(self):
         first = self.base / "first.pdf"
         first.write_bytes(b"first")
         self.run_cli("open")
@@ -158,9 +144,9 @@ class InputFlowTest(unittest.TestCase):
         self.run_cli("open")
         self.run_cli("add", second)
         self.run_cli("close")
-        with sqlite3.connect(self.registry_db) as connection:
-            rows = list(connection.execute("SELECT idd, extension FROM extension_registry"))
-        self.assertEqual(rows, [(hashlib.sha256(b"pdf").hexdigest(), "pdf")])
+        second_folder = self.base / "second-cycle/Transformer_Core/Hot_Hub/data/by_extension/pdf"
+        self.assertEqual(len(list(second_folder.iterdir())), 1)
+        self.assertFalse((self.base / "persistent").exists())
 
     def test_changed_cached_bytes_are_refused_and_incomplete_add_is_recovered(self):
         source = self.base / "source.txt"
