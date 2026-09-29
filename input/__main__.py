@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from BN1_1.Pacote.cache import CacheError, Pacote
+from Transformer_Core.Hot_Hub.hub import HubError
 
 
 def main() -> int:
@@ -14,7 +15,7 @@ def main() -> int:
     commands.add_parser("open", help="Abre um novo Input")
     add = commands.add_parser("add", help="Copia arquivos reais para o Pacote")
     add.add_argument("files", nargs="+", type=Path)
-    commands.add_parser("close", help="Fecha, espelha no Hot Hub e libera o cache do BBN1_1")
+    commands.add_parser("close", help="Fecha, preserva os originais e cria os campos no Hot Hub")
     commands.add_parser("status", help="Mostra o estado sem abrir arquivos")
     args = parser.parse_args()
 
@@ -27,10 +28,12 @@ def main() -> int:
         elif args.command == "add":
             print(f"Arquivos recebidos no ciclo: {pacote.add(args.files)}")
         elif args.command == "close":
-            print(f"Input fechado. n={pacote.close()}; Hot Hub verificado e cache do BBN1_1 liberado.")
+            print(f"Input fechado. n={pacote.close()}; Hot Hub verificado, representações publicadas e cache do BBN1_1 liberado.")
+            counts = pacote.status()["representations"]
+            print(f"Decodificados: {counts['decoded']}; parciais: {counts['partial']}; não modelados: {counts['opaque']}.")
         else:
             print(json.dumps(pacote.status(), ensure_ascii=False))
-    except (CacheError, OSError) as exc:
+    except (CacheError, HubError, OSError) as exc:
         parser.exit(1, f"Erro: {exc}\n")
     return 0
 

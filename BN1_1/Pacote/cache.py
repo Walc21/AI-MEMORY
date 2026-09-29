@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from BN1_1.Namer.namer import Namer, NamerError
-from BN1_1.Sorter.sorter import Sorter, SorterError
+from BN1_1.contracts import validate_names
 from BN1_1.BBN1_1.buffer import BBN1_1, BufferError
 from Transformer_Core.Hot_Hub.hub import HotHub, HubError, _digest
 
@@ -78,6 +78,8 @@ class Pacote:
             "MIRRORING", "HUB_VERIFIED", "HUB_READY",
         ) or not isinstance(state.get("items"), list):
             raise CacheError("Estado do ciclo inválido.")
+        if state.get("layout_version") != 2:
+            raise CacheError("Ciclo do layout antigo preservado. Use outro MIMIR_RUNTIME_DIR e reenvie os originais; migração automática não é suportada.")
         return state
 
     def open(self) -> None:
@@ -88,7 +90,7 @@ class Pacote:
             self.namer_inbox.mkdir(mode=0o700, parents=True, exist_ok=True)
             if any(self.files.iterdir()) or any(self.namer_inbox.iterdir()):
                 raise CacheError("Há dados de um início incompleto; escolha outro diretório de execução.")
-            _write_json(self.state_file, {"status": "OPEN", "items": []})
+            _write_json(self.state_file, {"layout_version": 2, "status": "OPEN", "items": []})
 
     def add(self, paths: list[Path]) -> int:
         if not paths:
@@ -209,7 +211,7 @@ class Pacote:
         _write_json(self.state_file, state)
 
     def supply(self, filename: str, target: Path) -> tuple[str, str]:
-        """Provide one named file on BBN1_1 request; Sorter never calls this."""
+        """Provide one named file on BBN1_1 request."""
         state = self._state()
         matches = [item for item in state["items"] if item.get("renamed") == filename]
         if len(matches) != 1 or state["status"] not in (
@@ -237,9 +239,8 @@ class Pacote:
         expected = {}
         for item in state["items"]:
             filename = item["renamed"]
-            extension = Sorter.extension(filename)
-            relative = (Path("by_extension") / extension / filename if extension
-                        else Path("no_extension") / filename).as_posix()
+            validate_names([filename])
+            relative = filename
             digest = _digest(self.files / item["entry"] / filename)
             if item.get("sha256_content") not in (None, digest):
                 raise CacheError("O conteúdo do Pacote mudou desde a entrada.")
@@ -256,7 +257,10 @@ class Pacote:
             if state["status"] == "HUB_READY":
                 expected = self._expected_mirror(state)
                 try:
-                    HotHub(self.runtime).verify(expected)
+                    hub = HotHub(self.runtime)
+                    hub.verify(expected)
+                    state["representations"] = hub.normalize(expected)["summary"]
+                    _write_json(self.state_file, state)
                     return n
                 except HubError:
                     # Pacote is still intact: rebuild the intermediate copy,
@@ -273,11 +277,9 @@ class Pacote:
             except (NamerError, ValueError, TypeError) as exc:
                 raise CacheError(str(exc)) from exc
             self._rename(state, stems)
-            sorter = Sorter()
             try:
-                groups = sorter.classify([item["renamed"] for item in state["items"]])
-                stored = BBN1_1(self.runtime).store(groups, sorter, self)
-            except (SorterError, BufferError) as exc:
+                stored = BBN1_1(self.runtime).store([item["renamed"] for item in state["items"]], self)
+            except (ValueError, BufferError) as exc:
                 raise CacheError(str(exc)) from exc
             if stored != n:
                 raise CacheError("O BBN1_1 não recebeu todos os arquivos.")
@@ -293,6 +295,7 @@ class Pacote:
                 raise CacheError("O Hot Hub não recebeu o lote completo.")
             state["status"] = "HUB_VERIFIED"
             _write_json(self.state_file, state)
+            state["representations"] = hub.normalize(expected)["summary"]
             bbn.purge_verified(expected, hub, lambda: self._expected_mirror(state))
             state["status"] = "HUB_READY"
             _write_json(self.state_file, state)
@@ -301,4 +304,7 @@ class Pacote:
     def status(self) -> dict:
         with self._locked():
             state = self._state()
-            return {"status": state["status"], "n": self._count(state)}
+            result = {"status": state["status"], "n": self._count(state)}
+            if "representations" in state:
+                result["representations"] = state["representations"]
+            return result

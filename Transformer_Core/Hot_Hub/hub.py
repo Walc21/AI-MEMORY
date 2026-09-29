@@ -1,4 +1,4 @@
-"""Copy the BBN1_1 tree without changing its extension partitions or names."""
+"""Mirror flat originals and publish a common field representation."""
 
 import hashlib
 import json
@@ -6,6 +6,8 @@ import os
 import stat
 import tempfile
 from pathlib import Path
+
+from BN1_1.contracts import validate_names
 
 
 class HubError(Exception):
@@ -42,6 +44,7 @@ class HotHub:
         return files
 
     def mirror(self, bbn_root: Path, expected: dict[str, str]) -> int:
+        validate_names(list(expected))
         if self._tree_files(bbn_root) != set(expected):
             raise HubError("O BBN1_1 não contém exatamente o lote esperado.")
         self.data.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -103,3 +106,12 @@ class HotHub:
         for relative, digest in expected.items():
             if _digest(self.data / relative) != digest:
                 raise HubError("Arquivo alterado no Hot Hub.")
+
+    def normalize(self, expected: dict[str, str]) -> dict:
+        from Transformer_Core.Fields.store import FieldStore, FieldError
+
+        self.verify(expected)
+        try:
+            return FieldStore(self.root).build(expected)
+        except FieldError as exc:
+            raise HubError(str(exc)) from exc
