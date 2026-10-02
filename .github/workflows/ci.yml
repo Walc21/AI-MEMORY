@@ -10,6 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Validate standard-library-only pipeline
+        run: python -S -m unittest discover -s tests -p 'test_structural_core.py' -v
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -22,9 +35,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt -r requirements-demo.txt
+        run: python -m pip install -r requirements.txt -r requirements-demo.txt -r requirements-structural.txt
       - name: Check syntax
-        run: python -m compileall -q input BN1_1 Transformer_Core examples tests
+        run: python -m compileall -q input BN1_1 BN1_2 Transformer_Core examples tests
       - name: Run regressions
         run: python -m unittest discover -s tests -v
-

@@ -1,5 +1,7 @@
 # Contrato do Hot Hub: vetor de bytes e chunks de 1024
 
+Na v0.2.0, este contrato permanece vigente e alimenta a nova [etapa estrutural até BN1_2](structural-pipeline.md). `close` ainda termina em `HUB_READY`; `transform` consome o snapshot verificado sem depender do BBN1_1 já liberado.
+
 ## Escopo e substituição
 
 Esta fase substitui integralmente o espelho de originais e os campos dependentes de decodificadores. O Hot Hub não extrai texto, células, frames, áudio ou sinais físicos. Recebe os bytes completos fornecidos pelo BBN1_1 e publica um único formato, JSON Lines UTF-8. Desconhecimento da extensão ou impossibilidade de decodificar o conteúdo não alteram o procedimento.
@@ -61,6 +63,8 @@ O manifesto `manifest.jsonl` contém uma única linha com:
 - `summary`: totais `files`, `bytes` válidos e `chunks`.
 
 O manifesto é o ponto de publicação. Consumidores não devem descobrir lotes listando diretórios nem concatenar chunks globalmente. Devem selecionar a geração ativa, resolver o arquivo pelo manifesto e validar seu conjunto. `HotHub.verify(expected)` faz a validação completa e `HotHub.reconstruct(name, expected)` oferece um consumidor de referência.
+
+`HotHub.reconstruct_snapshot(name, snapshot)` permite consumir vários arquivos de um snapshot obtido por `verify` sem repetir a verificação de todo o lote por arquivo. Confere novamente o hash e o contrato de cada registro solicitado, além do tamanho e SHA-256 do vetor recuperado. O chamador precisa serializar builds durante esse consumo; `Pacote.transform` mantém o bloqueio do ciclo para isso.
 
 ## Integração, falhas e integridade
 
