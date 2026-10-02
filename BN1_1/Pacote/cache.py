@@ -305,5 +305,45 @@ class Pacote:
             result = {"status": state["status"], "n": self._count(state)}
             if "representations" in state:
                 result["representations"] = state["representations"]
+            transform_state = self.runtime / "Transformer_Core/Structural/state.json"
+            if transform_state.exists():
+                from Transformer_Core.Hot_Hub.hub import _open_regular
+                with _open_regular(transform_state) as stream:
+                    result["transform"] = json.load(stream)
             return result
 
+    def transform(self, limits=None, strict: bool = False, force: bool = False) -> dict:
+        """Finish byte ingestion, then advance under the existing cycle lock."""
+        from Transformer_Core.structural.pipeline import StructuralPipeline
+        self.close()
+        with self._locked():
+            state = self._state()
+            if state["status"] != "HUB_READY":
+                raise CacheError("Transformação requer Hot Hub pronto.")
+            return StructuralPipeline(self.runtime).build(self._expected_sources(state), limits, strict, force)
+
+    def verify_transform(self) -> dict:
+        from Transformer_Core.structural.pipeline import StructuralPipeline
+        with self._locked():
+            state = self._state()
+            if state["status"] != "HUB_READY":
+                raise CacheError("Transformação requer Hot Hub pronto.")
+            self._count(state)
+            return StructuralPipeline(self.runtime).verify(self._expected_sources(state))
+
+    def inspect_transform(self, name: str | None = None):
+        from Transformer_Core.structural.pipeline import StructuralPipeline
+        with self._locked():
+            state = self._state()
+            if state["status"] != "HUB_READY":
+                raise CacheError("Transformação requer Hot Hub pronto.")
+            self._count(state)
+            expected = self._expected_sources(state)
+            if name is not None and name not in expected:
+                raise CacheError("Nome canônico não encontrado no ciclo.")
+            documents = StructuralPipeline(self.runtime).documents(expected)
+            if name is not None:
+                return next(document for source, document in documents if source == name)
+            return [{"source": source, "protocol": document["protocol"],
+                     "nodes": len(document["nodes"]), "edges": len(document["provenance"]["edges"])}
+                    for source, document in documents]

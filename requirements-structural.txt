@@ -1,0 +1,4 @@
+# Optional readers; text, JSON, CSV, DOCX, XLSX and PCM WAV use stdlib.
+pypdf>=6,<7
+Pillow>=12,<13
+av==16.1.0

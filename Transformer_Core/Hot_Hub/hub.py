@@ -241,12 +241,25 @@ class HotHub:
 
     def reconstruct(self, name: str, expected: dict[str, str]) -> bytes:
         """Reference consumer: verify the batch, then concatenate valid bytes."""
-        manifest = self.verify(expected)
+        return self.reconstruct_snapshot(name, self.verify(expected))
+
+    def reconstruct_snapshot(self, name: str, manifest: dict) -> bytes:
+        """Consume one record from an already verified generation snapshot.
+
+        The pipeline verifies the batch once, then checks each requested record.
+        This avoids verifying the entire batch once per source. Direct callers
+        must obtain this snapshot through verify() and serialize build operations.
+        """
+        validate_names([name])
         path = self.generations / manifest["generation"] / manifest["records"][name]["file"]
+        digest = manifest["sources"][name]
+        if _digest(path) != manifest["records"][name]["sha256"]:
+            raise HubError("Registro mudou após a verificação do lote.")
+        self._verify_record(path, name, digest, manifest["generation"])
         with _open_regular(path) as stream:
             header = json.loads(stream.readline())
             vector = b"".join(bytes(chunk["values"][:chunk["valid_length"]])
                               for chunk in map(json.loads, stream))
-        if len(vector) != header["byte_length"] or hashlib.sha256(vector).hexdigest() != expected[name]:
+        if len(vector) != header["byte_length"] or hashlib.sha256(vector).hexdigest() != digest:
             raise HubError("O registro mudou durante a reconstrução.")
         return vector
