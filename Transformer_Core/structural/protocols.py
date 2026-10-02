@@ -8,12 +8,18 @@ import io
 import json
 import math
 from pathlib import Path, PurePosixPath
+import threading
 import wave
 import xml.etree.ElementTree as ET
 import zipfile
 
 from .model import Limits, ProtocolError, ProtocolResult, StructuralError, Unit
 from .router import route
+
+
+# csv.field_size_limit is process-global. Serialize temporary adjustments for
+# direct library callers as well as the isolated pipeline workers.
+_CSV_LIMIT_LOCK = threading.RLock()
 
 
 def dependency_versions() -> dict:
@@ -73,13 +79,21 @@ def _csv(data: bytes, filename: str, limits: Limits, result: ProtocolResult):
     text = data.decode("utf-8-sig")
     if len(text) > limits.max_text_chars:
         raise ProtocolError("text_limit")
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t" if Path(filename).suffix.lower() == ".tsv" else ",", strict=True)
-    previous = 0
-    for row_number, fields in enumerate(reader, 1):
-        result.add(Unit("table_row", {"type": "csv_row", "row": row_number,
-                                     "line_start": previous + 1, "line_end": reader.line_num},
-                        {"fields": fields}), limits)
-        previous = reader.line_num
+    with _CSV_LIMIT_LOCK:
+        previous_limit = csv.field_size_limit()
+        # The complete input already passed max_text_chars. A valid field may
+        # exceed Python's unrelated default of 128 KiB without exceeding it.
+        csv.field_size_limit(max(previous_limit, len(text)))
+        try:
+            reader = csv.reader(io.StringIO(text, newline=""), delimiter="\t" if Path(filename).suffix.lower() == ".tsv" else ",", strict=True)
+            previous = 0
+            for row_number, fields in enumerate(reader, 1):
+                result.add(Unit("table_row", {"type": "csv_row", "row": row_number,
+                                             "line_start": previous + 1, "line_end": reader.line_num},
+                                {"fields": fields}), limits)
+                previous = reader.line_num
+        finally:
+            csv.field_size_limit(previous_limit)
 
 
 class OfficeArchive:
@@ -119,6 +133,14 @@ S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 
+def _docx_paragraph_text(paragraph):
+    """Preserve explicit Word text separators in document order."""
+    controls = {W + "tab": "\t", W + "br": "\n", W + "cr": "\n",
+                W + "noBreakHyphen": "\u2011", W + "softHyphen": "\u00ad"}
+    return "".join(part.text or "" if part.tag == W + "t" else controls.get(part.tag, "")
+                   for part in paragraph.iter())
+
+
 def _docx(data: bytes, filename: str, limits: Limits, result: ProtocolResult):
     total = 0
     with OfficeArchive(data, limits) as archive:
@@ -129,13 +151,14 @@ def _docx(data: bytes, filename: str, limits: Limits, result: ProtocolResult):
         for position, element in enumerate(body):
             location = {"type": "ooxml", "member": "word/document.xml", "body_index": position}
             if element.tag == W + "p":
-                text = "".join(part.text or "" for part in element.iter(W + "t"))
+                text = _docx_paragraph_text(element)
                 total += len(text)
                 result.add(Unit("paragraph", location, {"text": text}), limits)
             elif element.tag == W + "tbl":
                 table = result.add(Unit("table", location), limits)
                 for row_number, row in enumerate(element.findall(W + "tr"), 1):
-                    cells = ["".join(part.text or "" for part in cell.iter(W + "t")) for cell in row.findall(W + "tc")]
+                    cells = ["\n".join(_docx_paragraph_text(paragraph) for paragraph in cell.iter(W + "p"))
+                             for cell in row.findall(W + "tc")]
                     total += sum(map(len, cells))
                     result.add(Unit("table_row", {**location, "row": row_number}, {"cells": cells}, table), limits)
             if total > limits.max_text_chars:

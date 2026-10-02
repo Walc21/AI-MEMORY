@@ -6,7 +6,6 @@ from pathlib import Path
 import sys
 import time
 
-from BN1_2.buffer import write_atomic
 from Transformer_Core.semantic.model import SemanticError
 from Transformer_Core.semantic.storage import read_json
 from . import Channels
@@ -73,6 +72,11 @@ def dispatch(args, memory):
             return channels.status()
         if cmd == "configure":
             values = read_json(args.metadata)
+            required = {"root", "incoming", "outgoing", "account_email"}
+            if (not isinstance(values, dict) or not required <= values.keys()
+                    or any(not isinstance(values[key], dict) for key in ("root", "incoming", "outgoing"))
+                    or not isinstance(values["account_email"], str)):
+                raise SemanticError("Configuração requer root, incoming e outgoing como objetos, e account_email como texto.")
             return channels.configure(values["root"], values["incoming"], values["outgoing"], values["account_email"])
         if cmd == "ingest":
             return channels.ingest_file(args.path, read_json(args.before), read_json(args.after), **_settings(args))
@@ -119,17 +123,19 @@ def dispatch(args, memory):
         servers["mimir-" + role] = {"command": sys.executable, "args": argv}
     if args.client == "json":
         result = {"mcpServers": servers}
-        if args.output:
-            if args.output.exists() or args.output.is_symlink():
-                raise SemanticError("Configuração de harness já existe; escolha outro arquivo.")
-            write_atomic(args.output, result)
-            return {"config_file": str(args.output.absolute()), "client": "json"}
-        return result
-    text = "\n".join(f"[mcp_servers.{name}]\ncommand = {json.dumps(value['command'])}\nargs = {json.dumps(value['args'])}\n" for name, value in servers.items())
+        if not args.output:
+            return result
+        text = json.dumps(result, ensure_ascii=True, indent=2) + "\n"
+    else:
+        # JSON's surrogate-pair escapes are not valid TOML Unicode scalars.
+        # Literal UTF-8 retains paths containing emoji and other non-BMP text.
+        text = "\n".join(f"[mcp_servers.{name}]\ncommand = {json.dumps(value['command'], ensure_ascii=False)}\nargs = {json.dumps(value['args'], ensure_ascii=False)}\n" for name, value in servers.items())
     if args.output:
         descriptor = os.open(args.output, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(descriptor, "w") as stream:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(text)
-        return {"config_file": str(args.output.absolute()), "client": "codex"}
+            stream.flush()
+            os.fsync(stream.fileno())
+        return {"config_file": str(args.output.absolute()), "client": args.client}
     print(text)
     return None

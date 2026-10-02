@@ -1,4 +1,4 @@
-# Entrada, saída, Drive e MCP — v0.4.0
+# Entrada, saída, Drive e MCP — v0.4.1
 
 Os canais se apoiam no pipeline existente: Pacote → BN1_1 → Hot Hub → protocolos/Curadoria/G_P → BN1_2 → Semantic Core. A integração transporta dados e acrescenta proveniência externa às inferências; não atribui significado durante o transporte. O MCP de memória consulta o mesmo ledger verificado que a CLI e a API `Memory`.
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "mimir-memory",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Persistent, evidence-grounded memory with separate Drive I/O and harness MCP servers.",
   "extensions": {
     "com.openai": {

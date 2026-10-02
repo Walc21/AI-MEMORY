@@ -67,7 +67,12 @@ def rule_claims(text: str) -> list[dict]:
                 from_time = obj
             if not obj or len(obj) > 1000:
                 continue
-            valid_time(from_time, to_time)
+            try:
+                valid_time(from_time, to_time)
+            except SemanticError:
+                # A malformed date in source text is still searchable evidence;
+                # abstain on this sentence instead of aborting the entire batch.
+                break
             claims.append({"subject": subject, "predicate": predicate, "object": obj,
                            "object_type": object_type, "polarity": "negative" if found["negative"] else "positive",
                            "quote": text[start:end], "start": start, "end": end,
@@ -83,8 +88,8 @@ def extractor_profile(name="rules", model=None, endpoint="http://127.0.0.1:11434
         parsed = urlparse(endpoint)
         if not model or parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"} or parsed.username or parsed.password or parsed.query or parsed.fragment:
             raise SemanticError("Ollama requer modelo explícito e endpoint HTTP local.")
-    return {"name": name, "version": "1", "model_id": model if name == "ollama" else "deterministic-rules",
-            "model_revision": "local-pinned" if name == "ollama" else "1",
+    return {"name": name, "version": "1" if name == "ollama" else "2", "model_id": model if name == "ollama" else "deterministic-rules",
+            "model_revision": "local-pinned" if name == "ollama" else "2",
             "prompt_template_hash": fingerprint(PROMPT if name == "ollama" else RELATIONS),
             "parameters": {"temperature": 0, "endpoint": endpoint if name == "ollama" else None}}
 

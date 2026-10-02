@@ -131,10 +131,30 @@ def search(store, manifest, ledger, query, k=8, valid_at=None, as_of=None, histo
     invalid_reflections = {row["object"] for row in ledger.rows("relations") if row["predicate"] == "invalidates" and (not as_of or row["transaction_time"] <= as_of)}
     supporting = set(assertion_ids)
     hit_anchors = {hit["evidence"]["anchor_id"] for hit in hits}
-    supporting.update(row["id"] for row in ledger.rows("episodes") if any(ev["anchor_id"] in hit_anchors for ev in row["evidence"]) and (not as_of or row["transaction_time"] <= as_of))
+    unavailable_evidence = {}
+    for assertion in ledger.rows("assertions"):
+        if assertion["id"] not in eligible and (not as_of or assertion["transaction_time"] <= as_of):
+            for ev in assertion["evidence"]:
+                unavailable_evidence.setdefault((ev["binding_id"], ev["property"]), []).append((ev["char_start"], ev["char_end"]))
+    available = set(eligible)
+    for episode in ledger.rows("episodes"):
+        if as_of and episode["transaction_time"] > as_of:
+            continue
+        if any(start < ev["char_end"] and end > ev["char_start"] for ev in episode["evidence"]
+               for start, end in unavailable_evidence.get((ev["binding_id"], ev["property"]), [])):
+            continue
+        available.add(episode["id"])
+        if any(ev["anchor_id"] in hit_anchors for ev in episode["evidence"]):
+            supporting.add(episode["id"])
     reflections = []
     for row in sorted(ledger.rows("reflections"), key=lambda value: (value["level"], value["id"])):
-        if row["id"] in invalid_reflections or as_of and row["transaction_time"] > as_of or not set(row["dependencies"]) & supporting:
+        dependencies = set(row["dependencies"])
+        if row["id"] in invalid_reflections or as_of and row["transaction_time"] > as_of or not dependencies <= available:
+            continue
+        # Relevance to one hit does not establish the temporal validity of all
+        # other dependencies. Check the complete hierarchy before packing it.
+        available.add(row["id"])
+        if not dependencies & supporting:
             continue
         supporting.add(row["id"])
         remaining = budget_chars - used

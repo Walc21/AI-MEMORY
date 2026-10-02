@@ -115,7 +115,7 @@ class Index:
             from .storage import read_json
             try:
                 value = read_json(self.manifest)
-                rebuild = value.get("profile") != self.profile or value.get("sha256") != _digest(self.path)
+                rebuild = not isinstance(value, dict) or value.get("profile") != self.profile or value.get("sha256") != _digest(self.path)
             except (ValueError, OSError, SemanticError):
                 rebuild = True
         if rebuild or force:
@@ -169,7 +169,10 @@ class Index:
         with self.connect() as connection:
             if terms:
                 expression = " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
-                lexical = [row[0] for row in connection.execute("SELECT id FROM lexical WHERE lexical MATCH ? ORDER BY bm25(lexical), id LIMIT ?", (expression, k))]
+                lexical = [row[0] for row in connection.execute(
+                    "SELECT lexical.id FROM lexical JOIN passages ON passages.id = lexical.id "
+                    "WHERE lexical MATCH ? AND (? IS NULL OR passages.transaction_time <= ?) "
+                    "ORDER BY bm25(lexical), lexical.id LIMIT ?", (expression, as_of, as_of, k))]
             rows = {}
             vector_scores = []
             query_vector = self.vector.encode(query)

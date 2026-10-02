@@ -6,7 +6,7 @@ import json
 
 SCHEMA = "mimir.structural.v1"
 PROVENANCE_SCHEMA = "mimir.provenance.v1"
-PIPELINE_VERSION = "0.2.0"
+PIPELINE_VERSION = "0.2.1"
 
 
 class StructuralError(Exception):

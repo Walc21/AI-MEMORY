@@ -2,11 +2,11 @@
 
 [![CI](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml/badge.svg)](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
-[![Release](https://img.shields.io/badge/release-v0.4.0-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.4.0)
+[![Release](https://img.shields.io/badge/release-v0.4.1-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.4.1)
 
 **Memória local auditável: bytes → estrutura → evidências → afirmações temporais → consulta com fontes.**
 
-A **v0.4.0 adiciona entrada e saída sincronizáveis com Google Drive e dois MCPs: integração de dados e memória para harnesses de IA**. A revisão remota acompanha as evidências; saídas entram em uma fila persistente e só são confirmadas após verificar o arquivo publicado. A v0.3.0 implementou o Semantic Core sobre a fundação da v0.2.0. O [manual](docs/reference/semantic-core-manual.pdf) orienta o ledger e a recuperação; consulte o [guia de Drive e MCP](docs/drive-mcp.md) para conectar sua conta e seus agentes.
+A **v0.4.1 corrige falhas de execução identificadas na auditoria do pipeline, da memória, dos canais Drive e dos MCPs**. Inclui a entrada e saída sincronizáveis da v0.4.0 e os dois MCPs de integração de dados e memória para harnesses. A revisão remota acompanha as evidências; saídas entram em uma fila persistente e só são confirmadas após verificar o arquivo publicado. A v0.3.0 implementou o Semantic Core sobre a fundação da v0.2.0. O [manual](docs/reference/semantic-core-manual.pdf) orienta o ledger e a recuperação; consulte o [guia de Drive e MCP](docs/drive-mcp.md) para conectar sua conta e seus agentes e o [relatório da auditoria](docs/runtime-audit-v0.4.1.md) para reproduções e correções.
 
 ```mermaid
 flowchart LR

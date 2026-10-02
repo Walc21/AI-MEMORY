@@ -52,20 +52,22 @@ class Channels:
             raise IOError("Drive não configurado: execute drive bootstrap ou vincule as pastas pela ponte MCP.")
         value = read_json(self.config_file)
         fields = {"schema", "root_folder_id", "input_folder_id", "output_folder_id", "account_fingerprint", "backend"}
-        if not isinstance(value, dict) or set(value) != fields or value["schema"] != "mimir.drive-config.v1" or value["backend"] not in {"plugin", "api"}:
+        if not isinstance(value, dict) or set(value) != fields or value["schema"] != "mimir.drive-config.v1" or value["backend"] not in ("plugin", "api"):
             raise IOError("Configuração do Drive malformada.")
         for key in ("root_folder_id", "input_folder_id", "output_folder_id"):
             remote_id(value[key])
-        if len({value[key] for key in ("root_folder_id", "input_folder_id", "output_folder_id")}) != 3 or not re.fullmatch(r"[0-9a-f]{64}", value["account_fingerprint"]):
+        if len({value[key] for key in ("root_folder_id", "input_folder_id", "output_folder_id")}) != 3 or not isinstance(value["account_fingerprint"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["account_fingerprint"]):
             raise IOError("Pastas distintas e identidade da conta são obrigatórias.")
         return value
 
     def configure(self, root, incoming, outgoing, email, backend="plugin"):
         with self.locked(write=True):
-            if backend not in {"plugin", "api"}:
+            if backend not in ("plugin", "api"):
                 raise IOError("Backend deve ser plugin ou api.")
             for metadata in (root, incoming, outgoing):
-                remote_id(metadata["id"])
+                if not isinstance(metadata, dict) or not isinstance(metadata.get("parents", []), list) or any(not isinstance(parent, str) for parent in metadata.get("parents", [])):
+                    raise IOError("Metadados de pasta requerem objeto JSON e lista de parents.")
+                remote_id(metadata.get("id"))
                 if metadata.get("mimeType") != "application/vnd.google-apps.folder" or metadata.get("trashed"):
                     raise IOError("A configuração requer pastas reais não excluídas.")
                 if metadata.get("shared") or metadata.get("ownedByMe") is False:
@@ -110,10 +112,12 @@ class Channels:
             ensure_directories(self.store.base, folder)
             receipt_path = folder / "receipt.json"
             receipt = read_json(receipt_path) if receipt_path.exists() else None
-            if receipt and receipt["status"] == "COMPLETE" and not settings.get("force"):
+            completed = receipt if receipt and receipt.get("status") == "COMPLETE" else None
+            if completed:
                 self._verify_input(receipt, identity)
-                self._enqueue_unlocked(receipt, "ingestion", receipt["semantic_generation"])
-                return receipt
+                if not settings.get("force"):
+                    self._publish_input(receipt, before)
+                    return receipt
             metadata = {"provider": "google-drive", "file_id": before["id"], "revision": first,
                 "name": before["name"], "mime_type": before["mimeType"], "export_mime_type": export_mime,
                 "modified_time": before["modifiedTime"], "web_url": before.get("webViewLink"),
@@ -121,7 +125,8 @@ class Channels:
                 "sha256": digest, "input_job_id": identity}
             receipt = {"schema": "mimir.input-receipt.v1", "id": identity, "status": "PROCESSING",
                        "source": metadata, "created_at": receipt["created_at"] if receipt else now()}
-            write_atomic(receipt_path, receipt)
+            attempt_path = folder / "attempt.json" if completed else receipt_path
+            write_atomic(attempt_path, receipt)
             runtime = folder / "runtime"
             source_folder = folder / "source"
             ensure_directories(self.store.base, source_folder)
@@ -147,14 +152,20 @@ class Channels:
                 receipt.update(status="COMPLETE", semantic_generation=generation["generation"],
                     semantic_fingerprint=generation["fingerprint"], completed_at=now(), summary=generation["summary"])
                 write_atomic(receipt_path, receipt)
-                seen = self.root / "seen"
-                ensure_directories(self.store.base, seen)
-                write_atomic(seen / (self._seen_key(before) + ".json"), {"input_job_id": identity})
-                self._enqueue_unlocked(receipt, "ingestion", generation["generation"])
-                return receipt
+                if attempt_path != receipt_path:
+                    write_atomic(attempt_path, receipt)
             except Exception as exc:
-                write_atomic(receipt_path, {**receipt, "status": "FAILED", "error_type": type(exc).__name__, "failed_at": now()})
+                write_atomic(attempt_path, {**receipt, "status": "FAILED", "error_type": type(exc).__name__, "failed_at": now()})
                 raise
+            # Index/output failures must not roll back a committed semantic receipt.
+            self._publish_input(receipt, before)
+            return receipt
+
+    def _publish_input(self, receipt, metadata):
+        seen = self.root / "seen"
+        ensure_directories(self.store.base, seen)
+        write_atomic(seen / (self._seen_key(metadata) + ".json"), {"input_job_id": receipt["id"]})
+        self._enqueue_unlocked(receipt, "ingestion", receipt["semantic_generation"])
 
     @staticmethod
     def _seen_key(metadata):
