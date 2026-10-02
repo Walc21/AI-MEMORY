@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mimir-memory",
+  "version": "0.4.0",
+  "description": "Persistent, evidence-grounded memory with separate Drive I/O and harness MCP servers.",
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Mimir Memory",
+        "shortDescription": "Memory with Drive channels",
+        "longDescription": "Retrieve cited persistent memory and synchronize input/output through the authenticated Drive host or official API.",
+        "defaultPrompt": "Synchronize my Mimir memory with Google Drive and answer using its evidence."
+      }
+    }
+  }
+}

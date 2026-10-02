@@ -2,15 +2,17 @@
 
 [![CI](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml/badge.svg)](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
-[![Release](https://img.shields.io/badge/release-v0.3.0-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.3.0)
+[![Release](https://img.shields.io/badge/release-v0.4.0-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.4.0)
 
 **Memória local auditável: bytes → estrutura → evidências → afirmações temporais → consulta com fontes.**
 
-A **v0.3.0 implementa o Semantic Core e Output Storage**, concluindo o fluxo executável do Mimir sobre a fundação da v0.2.0. O [manual de implementação](docs/reference/semantic-core-manual.pdf) orienta os contratos, o histórico, a recuperação híbrida e os adaptadores multimodais. O ledger preserva as fontes; índices e resumos são derivações verificáveis.
+A **v0.4.0 adiciona entrada e saída sincronizáveis com Google Drive e dois MCPs: integração de dados e memória para harnesses de IA**. A revisão remota acompanha as evidências; saídas entram em uma fila persistente e só são confirmadas após verificar o arquivo publicado. A v0.3.0 implementou o Semantic Core sobre a fundação da v0.2.0. O [manual](docs/reference/semantic-core-manual.pdf) orienta o ledger e a recuperação; consulte o [guia de Drive e MCP](docs/drive-mcp.md) para conectar sua conta e seus agentes.
 
 ```mermaid
 flowchart LR
-    I[Input / Pacote] --> N[Namer / BBN1_1]
+    D[Drive / Entrada] --> IO[MCP I/O ou API OAuth]
+    IO --> I[Input / Pacote]
+    I --> N[Namer / BBN1_1]
     N --> H[Hot Hub: bytes]
     H --> T[Route Hub / protocolos]
     T --> C[Frankenstein / Curadoria]
@@ -20,6 +22,10 @@ flowchart LR
     E --> S[Semantic Core / G_S]
     S --> R[Busca híbrida / contexto]
     R --> O[Output Storage / resposta citada]
+    O --> Q[Outbox / recibo verificado]
+    Q --> DS[Drive / Saída]
+    R --> MCP[MCP de memória]
+    MCP <--> AI[Harness de IA]
 ```
 
 ## Comece agora
@@ -58,6 +64,35 @@ mimir verify
 ```
 
 O Semantic Core verifica e consome o BN1_2 existente. Os contratos `mimir.byte-chunks.v1`, `mimir.structural.v1`, `mimir.bn1_2.v1`, o layout 3 e os comandos `python -m input` continuam compatíveis. Sem BN1_2, a ingestão e transformação são concluídas automaticamente.
+
+## Google Drive e harnesses de IA
+
+Instale as integrações no ambiente Python que executará os MCPs:
+
+```bash
+python -m pip install '.[mcp,drive,structural]'
+mimir --memory-dir /caminho/absoluto/memoria mcp config --client json
+# Para Codex: substitua --client json por --client codex.
+```
+
+A configuração gerada contém comandos e caminhos absolutos para **`mimir-io`** e **`mimir-memory`**. Cole-a na configuração MCP do harness e reinicie-o. Ambos usam o mesmo namespace. O MCP de memória oferece `memory_query`, `memory_explain`, `memory_status` e `memory_working`; `--allow-write` na geração habilita episódios e atualização da Working Memory. O MCP de I/O recebe dados por `io_receive`, ingere fontes materializadas e confirma publicação no Drive.
+
+**Conta do plugin desta sessão:** use o [plugin local Mimir Memory](plugins/mimir-memory) e sua [skill de ponte](plugins/mimir-memory/skills/drive-memory/SKILL.md) junto ao Google Drive autenticado. O host cria/verifica `AI MEMORY - Mimir/Entrada` e `AI MEMORY - Mimir/Saída`, materializa downloads no staging e confirma uploads. O token protegido da sessão permanece no host. Essa ponte precisa do Drive com leitura/escrita e acesso ao mesmo filesystem dos MCPs; não roda sozinha em segundo plano.
+
+**Sincronização contínua pela API oficial**, autorizando a mesma conta Google:
+
+```bash
+# Crie um cliente OAuth Desktop no Google Cloud com Drive API habilitada.
+# Guarde o JSON do cliente fora do repositório e conclua o consentimento no navegador.
+mimir drive auth --client-secrets /caminho/privado/client_secret.json
+mimir drive bootstrap
+mimir drive sync
+mimir drive sync --watch --interval 30
+```
+
+`bootstrap` cria/reutiliza as pastas privadas e vincula a conta; uma configuração feita pela ponte pode ser utilizada pela API se a conta for a mesma. `sync` processa os arquivos diretamente na Entrada, preserva revisões anteriores e publica a outbox na Saída. Não apaga os originais. `io status` mostra a situação real; `PENDING` é uma saída local, `DELIVERED` é uma publicação remota verificada. Use `mimir query 'PERGUNTA' --publish` ou `io_publish_query` para enfileirar uma resposta citada. Instale os leitores opcionais para os formatos desejados. OCR, modelos locais e assinatura também são aceitos em `drive sync`.
+
+Para HTTP autenticado, empacotamento do plugin, exportação de memória e operação contínua, siga o [guia completo](docs/drive-mcp.md).
 
 ## Memória e consulta
 

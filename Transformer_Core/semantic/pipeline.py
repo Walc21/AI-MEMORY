@@ -42,7 +42,8 @@ class Memory:
 
     def ingest(self, runtime: Path, extractor="rules", model=None, endpoint="http://127.0.0.1:11434",
                limits=None, force=False, ocr=False, ocr_language="eng", asr_model=None,
-               strict_multimodal=False, signing_key=None, episode=None, vision_model=None, video_stride=30):
+               strict_multimodal=False, signing_key=None, episode=None, vision_model=None, video_stride=30,
+               source_metadata=None):
         limits = limits or SemanticLimits()
         extraction = extractor_profile(extractor, model, endpoint)
         modes = multimodal_profile(ocr, ocr_language, asr_model, strict_multimodal, vision_model, endpoint, video_stride)
@@ -63,6 +64,10 @@ class Memory:
                 raise SemanticError("Ollama/modelo local indisponível.") from exc
         profile = {"schema": "mimir.semantic-profile.v1", **code_profile(), "extractor": extraction,
                    "multimodal": modes, "limits": limits.profile(), "episode": episode}
+        if source_metadata is not None:
+            if not isinstance(source_metadata, dict) or any(not isinstance(key, str) or not isinstance(value, dict) or content_id(key.removeprefix("content:")) != key for key, value in source_metadata.items()):
+                raise SemanticError("source_metadata deve mapear content_id para metadados JSON.")
+            profile["source_metadata"] = source_metadata
         pacote = Pacote(Path(runtime))
         # Existing verified BN1_2 is preserved. Only create it when absent.
         if not BBN1_2(Path(runtime)).manifest.exists():
@@ -75,6 +80,8 @@ class Memory:
             expected = pacote._expected_sources(state)
             hub = HotHub(Path(runtime))
             snapshot = hub.verify(expected)
+            if source_metadata and not set(source_metadata) <= {content_id(digest) for digest in snapshot["sources"].values()}:
+                raise SemanticError("Metadados externos não correspondem aos bytes do upstream.")
             buffer = BBN1_2(Path(runtime))
             bn = buffer.verify(snapshot)
             with self.store.locked(write=True):
@@ -89,6 +96,10 @@ class Memory:
                              prompt_template_hash=extraction["prompt_template_hash"], parameters={"extractor": extraction["parameters"], "multimodal": modes},
                              **code_profile(), input_generation=bn["generation"], input_fingerprint=fingerprint(bn),
                              output_hash="0" * 64, timestamp=transaction_time)
+                if source_metadata is not None:
+                    run["parameters"]["source_metadata"] = source_metadata
+                    # Recompute the run identity after adding provenance.
+                    run = record("inference_runs", **{key: value for key, value in run.items() if key not in {"id", "schema"}})
                 total_chars, total_assertions = 0, 0
                 errors = []
                 for name, document in buffer.documents(snapshot):

@@ -12,3 +12,9 @@ build/
 dist/
 examples/generated/
 .venv/
+client_secret*.json
+google-token*.json
+*.token
+mimir-harness.json
+mimir-harness.toml
+mimir-memory-local.zip

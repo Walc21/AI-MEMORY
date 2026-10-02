@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.4.0 — 2026-10-02
+
+Entrada/saída Drive e MCPs de integração e memória para harnesses, preservando o Semantic Core da v0.3.0.
+
+- Canais persistentes com staging restrito, jobs de ingestão, revisão remota nas evidências e outbox com confirmação por hashes/tamanho/pasta.
+- Adapter oficial Drive v3 com OAuth Desktop, bootstrap de Entrada/Saída, paginação, exportações Docs/Sheets/Slides, deduplicação de revisões e polling.
+- IDs remotos pré-reservados para reconciliar uploads após timeout; filas e runtimes recuperáveis após interrupção.
+- Ponte com o plugin Google Drive autenticado no host, sem exportar sua credencial protegida; plugin local portátil e empacotador com comandos reais.
+- MCPs separados `io` e `memory`, SDK oficial, stdio/Streamable HTTP, bearer privado, proteção de Host/Origin e escrita de episódios opcional.
+- CLI `io`, `drive` e `mcp`, geração de configuração JSON/TOML e opções multimodais/assinatura no sincronizador.
+- 30 testes adicionais (114 no total), incluindo clientes MCP reais e núcleo I/O sem dependências; CI Python 3.10/3.12.
+
+O núcleo mantém instalação sem dependências. Integrações exigem extras `[mcp,drive]` e OAuth Google válido. A ponte depende das ferramentas e filesystem do host; sincronização autônoma utiliza grant API próprio. Pastas são privadas e criadas somente após autenticação com escopos suficientes. Não há deployment permanente ou conexão Google implícita incluída no pacote.
+
 ## v0.3.0 — 2026-10-02
 
 Semantic Core e Output Storage completam o fluxo de memória auditável sobre o BN1_2 existente, conforme o manual fornecido. O núcleo funciona localmente e sem chave de API.

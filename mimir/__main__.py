@@ -54,6 +54,7 @@ def main(argv=None):
     query.add_argument("--embedding-model")
     query.add_argument("--embedding-revision")
     query.add_argument("--save", action="store_true")
+    query.add_argument("--publish", action="store_true", help="Enfileira a resposta citada para publicação no Drive")
     query.add_argument("--text", action="store_true")
     commands.add_parser("verify", help="Verifica ledger, histórico, evidências e bytes")
     inspect = commands.add_parser("inspect", help="Inspeciona uma coleção canônica")
@@ -95,10 +96,17 @@ def main(argv=None):
     keys.add_argument("output", type=Path)
     evaluation = commands.add_parser("eval", help="Executa benchmark local ou dataset JSON")
     evaluation.add_argument("--dataset", type=Path)
+    from .io.cli import parsers
+    parsers(commands, _extraction)
     args = parser.parse_args(argv)
     try:
         memory = Memory(args.memory_dir, args.namespace)
-        if args.command == "run":
+        if args.command in {"io", "drive", "mcp"}:
+            from .io.cli import dispatch
+            result = dispatch(args, memory)
+            if result is None:
+                return 0
+        elif args.command == "run":
             pacote = Pacote(args.runtime)
             pacote.open()
             pacote.add(args.files)
@@ -111,6 +119,9 @@ def main(argv=None):
             result = memory.query(args.question, save=args.save, k=args.k, valid_at=args.valid_at, as_of=args.as_of,
                                   history=args.history, audit=args.audit, budget_chars=args.budget_chars,
                                   model=args.embedding_model, revision=args.embedding_revision)
+            if args.publish:
+                from .io import Channels
+                result["delivery"] = Channels(memory).enqueue(result, "answer", result["generation"])
             if args.text:
                 print(result["answer"])
                 for index, hit in enumerate(result["hits"], 1):
@@ -152,6 +163,8 @@ def main(argv=None):
             from Transformer_Core.semantic.evaluation import evaluate
             result = evaluate(args.dataset)
         print(json.dumps(result, ensure_ascii=True, indent=2, allow_nan=False))
+        if args.command == "drive" and args.drive_command == "sync" and result.get("complete") is False:
+            return 1
         return 0
     except (CacheError, HubError, StructuralError, SemanticError, OSError, ValueError, ImportError) as exc:
         parser.exit(1, f"Erro: {exc}\n")

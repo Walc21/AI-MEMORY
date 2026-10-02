@@ -188,6 +188,9 @@ def validate(ledger: Ledger, source_paths: dict | None = None):
             upstream = next((row for row in ledger.rows("upstreams") if row["bn_manifest"]["generation"] == run["input_generation"] and fingerprint(row["bn_manifest"]) == run["input_fingerprint"]), None)
             if upstream is None:
                 raise SemanticError("Run de inferência sem upstream verificado.")
+            external = run["parameters"].get("source_metadata", {})
+            if not isinstance(external, dict) or not set(external) <= {content_id(value) for value in upstream["hot_hub_manifest"]["sources"].values()} or any(not isinstance(value, dict) for value in external.values()):
+                raise SemanticError("Proveniência externa não corresponde ao conteúdo do run.")
         for report in ledger.rows("reports"):
             ledger.get("inference_runs", report["inference_run_id"])
             if not isinstance(report["multimodal_errors"], list) or not isinstance(report["capabilities"], dict) or not isinstance(report["usage"], dict):
