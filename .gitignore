@@ -5,3 +5,10 @@
 *.sqlite3-shm
 __pycache__/
 *.py[cod]
+.mimir-memory/
+.mimir-keys/
+*.egg-info/
+build/
+dist/
+examples/generated/
+.venv/
