@@ -78,13 +78,19 @@ class DriveAPI:
         return cls(credentials)
 
     def request(self, path, method="GET", body=None, mime="application/json", maximum=2 * 1024 * 1024):
+        from google.auth.exceptions import GoogleAuthError, TransportError
         from google.auth.transport.requests import Request
         if not path.startswith(("/drive/v3/", "/upload/drive/v3/")):
             raise IOError("Rota externa fora da API oficial do Drive.")
         data = json.dumps(body).encode() if isinstance(body, dict) else body
         headers = {"Accept": "application/json", "Content-Type": mime}
         url = "https://www.googleapis.com" + path
-        self.credentials.before_request(Request(), method, url, headers)
+        try:
+            self.credentials.before_request(Request(), method, url, headers)
+        except TransportError:
+            raise IOError("Rede indisponível durante renovação OAuth; tente novamente na próxima sincronização.") from None
+        except GoogleAuthError:
+            raise IOError("Não foi possível renovar a credencial OAuth; autentique novamente com drive auth em um novo arquivo de credenciais.") from None
         # GET is retryable. Writes use preallocated IDs and explicit reconciliation.
         for attempt in range(4 if method == "GET" else 1):
             try:
@@ -96,9 +102,15 @@ class DriveAPI:
             except urllib.error.HTTPError as exc:
                 try:
                     detail = json.loads(exc.read(16384))["error"]
-                    reason = detail.get("errors", [{}])[0].get("reason", detail.get("status", "request_failed"))
-                except (ValueError, KeyError, TypeError):
+                    errors = detail.get("errors") or []
+                    reason = errors[0].get("reason") if errors else None
+                    reason = reason or detail.get("status", "request_failed")
+                    if not isinstance(reason, str):
+                        reason = "request_failed"
+                except (ValueError, KeyError, TypeError, AttributeError, IndexError):
                     reason = "request_failed"
+                finally:
+                    exc.close()
                 retryable = exc.code in {429, 500, 502, 503, 504} or reason in {"rateLimitExceeded", "userRateLimitExceeded"}
                 if method == "GET" and retryable and attempt < 3:
                     time.sleep(min(8, .5 * 2 ** attempt))
@@ -107,6 +119,9 @@ class DriveAPI:
                     reason = "ACCESS_TOKEN_SCOPE_INSUFFICIENT: reconecte/autentique com leitura e escrita"
                 raise DriveError(exc.code, reason) from None
             except (OSError, TimeoutError) as exc:
+                if method == "GET" and attempt < 3:
+                    time.sleep(min(8, .5 * 2 ** attempt))
+                    continue
                 raise IOError("Rede do Drive indisponível; operação permanece pendente para reconciliação.") from exc
 
     def json(self, path, **options):
@@ -123,24 +138,33 @@ class DriveAPI:
         value = self.json("/drive/v3/about?fields=user(emailAddress,permissionId,displayName)")
         return value["user"]
 
+    def _file_pages(self, options):
+        options = dict(options)
+        seen_tokens = set()
+        while True:
+            page = self.json("/drive/v3/files?" + urllib.parse.urlencode(options))
+            if not isinstance(page, dict) or not isinstance(page.get("files", []), list) or any(not isinstance(row, dict) for row in page.get("files", [])):
+                raise IOError("Drive retornou uma página de arquivos inválida.")
+            yield page
+            token = page.get("nextPageToken")
+            if not token:
+                break
+            if not isinstance(token, str) or token in seen_tokens:
+                raise IOError("Drive retornou paginação inválida ou repetida.")
+            seen_tokens.add(token)
+            options["pageToken"] = token
+
     def files(self, folder, max_files=10000):
         remote_id(folder)
-        token = None
         count = 0
-        while True:
-            options = {"q": f"'{folder}' in parents and trashed = false", "fields": f"nextPageToken,files({FIELDS})",
-                       "pageSize": 1000, "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
-            if token:
-                options["pageToken"] = token
-            page = self.json("/drive/v3/files?" + urllib.parse.urlencode(options))
+        options = {"q": f"'{folder}' in parents and trashed = false", "fields": f"nextPageToken,files({FIELDS})",
+                   "pageSize": 1000, "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}
+        for page in self._file_pages(options):
             for row in page.get("files", []):
                 count += 1
                 if count > max_files:
                     raise IOError("Pasta excede max_sync_files; aumente o limite explicitamente.")
                 yield row
-            token = page.get("nextPageToken")
-            if not token:
-                break
 
     def folder(self, name, parent="root"):
         if parent != "root":
@@ -148,11 +172,13 @@ class DriveAPI:
         if name not in {"AI MEMORY - Mimir", "Entrada", "Saída"}:
             raise IOError("Bootstrap aceita somente as pastas do Mimir.")
         query = f"name = '{name}' and mimeType = 'application/vnd.google-apps.folder' and '{parent}' in parents and trashed = false"
-        page = self.json("/drive/v3/files?" + urllib.parse.urlencode({"q": query, "fields": f"files({FIELDS})", "pageSize": 100}))
-        if len(page.get("files", [])) > 1:
-            raise IOError("Há pastas homônimas; vincule IDs explícitos pela ponte.")
-        if page.get("files"):
-            existing = page["files"][0]
+        matches = []
+        for page in self._file_pages({"q": query, "fields": f"nextPageToken,files({FIELDS})", "pageSize": 100}):
+            matches.extend(page.get("files", []))
+            if len(matches) > 1:
+                raise IOError("Há pastas homônimas; vincule IDs explícitos pela ponte.")
+        if matches:
+            existing = matches[0]
             if existing.get("ownedByMe") is not True or existing.get("shared") is not False:
                 raise IOError("Bootstrap requer pasta privada pertencente à conta atual.")
             return existing
@@ -232,26 +258,31 @@ class DriveSync:
             config = self.channels.config()
         self.identity(config)
         accepted, skipped, failures = [], [], []
-        for item in self.api.files(config["input_folder_id"], self.channels.limits.max_sync_files):
-            if item["mimeType"] == "application/vnd.google-apps.folder":
-                skipped.append({"file_id": item["id"], "reason": "direct_children_only"})
-                continue
-            path = None
-            try:
-                before = self.api.metadata(item["id"])
-                self.channels._input_metadata(before)
-                if not settings.get("force") and self.channels.processed(before):
-                    skipped.append({"file_id": item["id"], "reason": "unchanged_revision"})
+        try:
+            for item in self.api.files(config["input_folder_id"], self.channels.limits.max_sync_files):
+                if item["mimeType"] == "application/vnd.google-apps.folder":
+                    skipped.append({"file_id": item["id"], "reason": "direct_children_only"})
                     continue
-                data = self.api.download(before, self.channels.limits.max_file_bytes)
-                after = self.api.metadata(item["id"])
-                path = self.channels.stage(data)
-                accepted.append(self.channels.ingest_file(path, before, after, **settings))
-            except (SemanticError, StructuralError, CacheError, HubError, OSError, ValueError) as exc:
-                failures.append({"file_id": item["id"], "error": str(exc) if isinstance(exc, IOError) else type(exc).__name__})
-            finally:
-                if path is not None:
-                    path.unlink(missing_ok=True)
+                path = None
+                try:
+                    before = self.api.metadata(item["id"])
+                    self.channels._input_metadata(before)
+                    if not settings.get("force") and self.channels.processed(before):
+                        skipped.append({"file_id": item["id"], "reason": "unchanged_revision"})
+                        continue
+                    data = self.api.download(before, self.channels.limits.max_file_bytes)
+                    after = self.api.metadata(item["id"])
+                    path = self.channels.stage(data)
+                    accepted.append(self.channels.ingest_file(path, before, after, **settings))
+                except (SemanticError, StructuralError, CacheError, HubError, OSError, ValueError) as exc:
+                    failures.append({"file_id": item["id"], "error": str(exc) if isinstance(exc, IOError) else type(exc).__name__})
+                finally:
+                    if path is not None:
+                        path.unlink(missing_ok=True)
+        except (SemanticError, OSError, ValueError) as exc:
+            # A partial or unavailable inbox must not strand previously queued outputs.
+            failures.append({"input_folder_id": config["input_folder_id"],
+                             "error": str(exc) if isinstance(exc, IOError) else type(exc).__name__})
         delivered = []
         for job in self.channels.pending(limit=10000):
             try:

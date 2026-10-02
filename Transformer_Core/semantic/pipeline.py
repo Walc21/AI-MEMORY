@@ -296,7 +296,7 @@ class Memory:
 
     def query(self, question, save=False, **settings):
         from .retrieval import search
-        with self.store.locked():
+        with self.store.locked(write=save):
             manifest, ledger = self.store.load()
             if manifest is None:
                 raise SemanticError("Memória vazia. Execute run ou semantic.")

@@ -26,6 +26,9 @@ jobs:
           python -S -m unittest discover -s tests -p 'test_structural_core.py' -v
           python -S -m unittest discover -s tests -p 'test_semantic_core.py' -v
           python -S -m unittest discover -s tests -p 'test_io_core.py' -v
+          python -S -m unittest discover -s tests -p 'test_io_runtime_regressions.py' -v
+          python -S -m unittest discover -s tests -p 'test_pipeline_runtime_regressions.py' -v
+          python -S -m unittest discover -s tests -p 'test_semantic_runtime_regressions.py' -v
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10

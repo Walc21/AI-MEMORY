@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.1 — 2026-10-02
+
+Correções de execução encontradas na auditoria completa do pipeline.
+
+- Preserva checkpoints `COMPLETE` da ingestão quando a outbox ou o índice local falham; reprocessamentos usam tentativas separadas e podem retomar sem repetir inferência.
+- Corrige campos CSV/TSV válidos acima do limite padrão do módulo `csv`, preserva tabulações, quebras e parágrafos em DOCX e invalida caches estruturais da versão anterior.
+- Corrige consultas históricas que filtravam resultados depois do limite BM25, reconstrução de índice com manifesto JSON inválido, permissões de `query --save`, datas inválidas isoladas e reflexões fora da validade temporal.
+- Contém falhas de paginação/rede do Drive para que a outbox continue sendo entregue, trata renovação OAuth de forma recuperável e preserva status HTTP em erros do provedor.
+- Corrige configurações de harness com Unicode, tokens HTTP longos, portas inválidas, metadados Drive malformados e empacotamento acidental do próprio ZIP.
+- Adiciona 30 regressões reproduzíveis e mantém a execução da suíte anterior.
+
 ## v0.4.0 — 2026-10-02
 
 Entrada/saída Drive e MCPs de integração e memória para harnesses, preservando o Semantic Core da v0.3.0.
