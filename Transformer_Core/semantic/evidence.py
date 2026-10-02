@@ -77,4 +77,10 @@ def resolve(ledger: Ledger, evidence: dict) -> dict:
             "upstream_id": occurrence["upstream_id"]}
     if prop.startswith("observation:"):
         result["derived_observation"] = observation
+    upstream = ledger.get("upstreams", occurrence["upstream_id"])
+    for run in sorted(ledger.rows("inference_runs"), key=lambda row: row["timestamp"]):
+        metadata = run["parameters"].get("source_metadata", {})
+        if run["input_generation"] == upstream["bn_manifest"]["generation"] and anchor["content_id"] in metadata:
+            result["external_source"] = metadata[anchor["content_id"]]
+            break
     return result

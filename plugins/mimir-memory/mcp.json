@@ -1,0 +1,7 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "mimir-io": {"type": "stdio", "command": "mimir", "args": ["mcp", "serve", "--role", "io"]},
+    "mimir-memory": {"type": "stdio", "command": "mimir", "args": ["mcp", "serve", "--role", "memory"]}
+  }
+}
