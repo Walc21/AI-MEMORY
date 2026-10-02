@@ -1,18 +1,23 @@
-"""The sole public entry point for starting an AI MEMORY Input."""
+"""Backward-compatible input CLI; complete semantic workflow is in mimir."""
 
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from BN1_1.Pacote.cache import CacheError, Pacote
 from Transformer_Core.Hot_Hub.hub import HubError
-from Transformer_Core.structural.model import Limits, PIPELINE_VERSION, StructuralError
+from Transformer_Core.structural.model import Limits, StructuralError
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] in {"semantic", "query", "run", "episode", "consolidate", "explain", "reindex"}:
+        from mimir.__main__ import main as semantic_main
+        return semantic_main(sys.argv[1:])
     parser = argparse.ArgumentParser(description="Janela manual de Input do AI MEMORY")
-    parser.add_argument("--version", action="version", version=f"AI MEMORY / Mimir {PIPELINE_VERSION}")
+    from mimir_version import __version__
+    parser.add_argument("--version", action="version", version=f"AI MEMORY / Mimir {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("open", help="Abre um novo Input")
     add = commands.add_parser("add", help="Copia arquivos reais para o Pacote")

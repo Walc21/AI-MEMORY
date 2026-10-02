@@ -1,13 +1,14 @@
 """Hot Hub → Route Hub → protocols → Frankenstein → Curadoria/G_P → BN1_2."""
 
 import json
+import base64
 from pathlib import Path
 
 from BN1_2.buffer import BBN1_2, HANDOFF_SCHEMA, ensure_directories, source_descriptor, write_atomic
 from Transformer_Core.Hot_Hub.hub import HotHub, _open_regular
 from .curator import assemble
-from .model import Limits, PIPELINE_VERSION, SCHEMA, StructuralError, fingerprint
-from .protocols import dependency_versions, observe
+from .model import Limits, PIPELINE_VERSION, SCHEMA, StructuralError, ProtocolError, ProtocolResult, Unit, fingerprint
+from .protocols import dependency_versions
 
 
 class StructuralPipeline:
@@ -48,7 +49,19 @@ class StructuralPipeline:
                     raise StructuralError(f"{name}: arquivo excede max_file_bytes.")
                 vector = self.hub.reconstruct_snapshot(name, snapshot)
                 source = source_descriptor(snapshot, name, len(vector))
-                result = observe(vector, name, limits, strict)
+                from Transformer_Core.semantic.worker import execute
+                from Transformer_Core.semantic.model import SemanticLimits, SemanticError
+                try:
+                    observed = execute({"mode": "structural", "data": base64.b64encode(vector).decode(),
+                                        "filename": name, "limits": limits.profile(), "strict": strict}, SemanticLimits())
+                    if set(observed) != {"route", "status", "reason", "dependencies", "units"}:
+                        raise StructuralError("Worker estrutural retornou contrato inválido.")
+                    result = ProtocolResult(observed["route"], observed["status"], observed["reason"],
+                                           observed["dependencies"], [Unit(**unit) for unit in observed["units"]])
+                except SemanticError as exc:
+                    if str(exc).startswith("ProtocolError:"):
+                        raise ProtocolError(str(exc).partition(":")[2].strip()) from exc
+                    raise StructuralError(str(exc)) from exc
                 document = assemble(source, result)
                 del vector
                 records[name] = self.buffer.store_document(folder, position, document)

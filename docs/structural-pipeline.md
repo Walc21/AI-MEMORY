@@ -154,7 +154,7 @@ O limite de arquivo é conferido antes da reconstrução, após a verificação 
 
 OOXML não extrai arquivos no disco, recusa caminhos com traversal, membros duplicados e declarações XML de entidades/DOCTYPE; links externos de planilhas não são acessados. A implementação não executa macros ou fórmulas. Leitores multimídia trabalham em memória sobre os bytes verificados, sem abrir URLs fornecidas pelo conteúdo.
 
-Os limites não equivalem a um sandbox de CPU/memória dos leitores. O consumo máximo dos decodificadores depende do formato, e algumas alocações ocorrem antes de verificações posteriores. A ingestão original também conserva sua leitura integral por arquivo.
+A partir da v0.3.0, os protocolos executam em workers separados com limites POSIX de CPU/memória/saída e timeout. O controle de auditoria Python não é uma sandbox de kernel para bibliotecas nativas. A ingestão original conserva sua leitura integral por arquivo. Consulte os [controles e limites do Semantic Core](semantic-core.md).
 
 ## Validação desta versão
 
