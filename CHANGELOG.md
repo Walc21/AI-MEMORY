@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.1 — 2026-10-03
+
+Resolve os quatro contratos reprovados na auditoria da v0.5.0; consulte [causas e aceite](docs/audit-fixes-v0.5.1.md).
+
+- Preserva a identidade completa e ordenada de pessoas/organizações na fundamentação das respostas.
+- Separa entidades JSON vizinhas e usa JSON Pointer sem colisão; mantém a verificação de evidências antigas e reconstrói o índice derivado v3. Reflexões antigas também respeitam os campos selecionados.
+- Exige cobertura temporal na fonte, sem projetar um fato pontual de 2020 para o presente nem reescrever o canon existente.
+- Persiste o ciclo de Input por namespace até entrega e limpeza; bloqueia outras ingestões, recupera interrupções e remove intermediários apenas após verificar o canon e o ACK privado.
+- Relê conta/pastas antes do upload e do ACK, exige flags explícitas e reconcilia recibos legados com readback atual. A ponte MCP usa `io_begin_input`, `io_cancel_download` e `folder_validation`.
+- Acrescenta regressões dos quatro contratos e um gate da wheel instalada fora do checkout na CI e na publicação.
+
 ## v0.4.1 — 2026-10-02
 
 Correções de execução encontradas na auditoria completa do pipeline.

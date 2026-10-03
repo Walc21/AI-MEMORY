@@ -1,7 +1,6 @@
-"""Deterministic record views of G_P, with every component's original locator.
+"""Frozen v0.5.0 views, only for verifying immutable historical evidence.
 
-These are semantic projections, never edits to the structural document. No joins
-cross a file, array record, table or worksheet. Formulae are never evaluated.
+Never index or select these views for a new answer; use views.DocumentViews.
 """
 
 from collections import defaultdict
@@ -9,13 +8,8 @@ import json
 import re
 
 
-PROPERTY = "projection:record-v2"
-FIELD_PREFIX = "projection:field-v2:"
-IDENTITY_KEYS = {"id", "name", "nome", "project", "projeto", "sensor", "item", "product", "produto", "person", "pessoa", "user", "usuario", "code", "codigo"}
-
-
-def pointer(parts):
-    return "/" + "/".join(p.replace("~", "~0").replace("/", "~1") for p in parts)
+PROPERTY = "projection:record-v1"
+FIELD_PREFIX = "projection:field-v1:"
 
 
 def scalar(value):
@@ -24,7 +18,6 @@ def scalar(value):
 
 class DocumentViews:
     def __init__(self, document):
-        self.document = document
         self.records = {}
         nodes = document["nodes"]
         self.children = defaultdict(list)
@@ -34,9 +27,9 @@ class DocumentViews:
         if route == "json":
             for node in nodes:
                 if node["kind"] == "json_object":
-                    fields, components, paths = {}, [], {}
-                    self._json(node, [], fields, components, paths)
-                    self._put(node, node["locator"]["pointer"] or "/", fields, components, paths)
+                    fields, components = {}, []
+                    self._json(node, "", fields, components)
+                    self._put(node, node["locator"]["pointer"] or "/", fields, components)
         elif route in {"csv", "docx"}:
             tables = defaultdict(list)
             for node in nodes:
@@ -76,25 +69,15 @@ class DocumentViews:
                     representative = next(iter(rows[number].values()))
                     self._put(representative, f"{sheet['properties']['name']} / row {number}", fields, components)
 
-    def _identified(self, node):
-        from .model import normalized
-        return any(child["kind"] == "json_value" and
-                   normalized(child["locator"]["pointer"].rsplit("/", 1)[-1]) in IDENTITY_KEYS
-                   for child in self.children[node["id"]])
-
-    def _json(self, node, prefix, fields, components, paths):
+    def _json(self, node, prefix, fields, components):
         for child in self.children[node["id"]]:
             token = child["locator"]["pointer"].rsplit("/", 1)[-1].replace("~1", "/").replace("~0", "~")
-            parts = prefix + [token]
-            key = pointer(parts)
+            key = prefix + token
             if child["kind"] == "json_value":
                 fields[key] = child["properties"]["value"]
-                paths[key] = parts
                 components.append(child)
-            elif child["kind"] == "json_object" and not self._identified(child):
-                # A nested object with its own identifier is a new record.
-                # Never flatten sibling people's fields into their parent.
-                self._json(child, parts, fields, components, paths)
+            elif child["kind"] == "json_object":
+                self._json(child, key + ".", fields, components)
             # Arrays define a record boundary; siblings are never flattened.
 
     @staticmethod
@@ -111,12 +94,12 @@ class DocumentViews:
             if len(values) == len(labels):
                 self._put(row, f"row {row['locator']['row']}", dict(zip(labels, values)), [rows[0], row])
 
-    def _put(self, node, path, fields, components, paths=None):
+    def _put(self, node, path, fields, components):
         if not fields:
             return
         text = "Registro " + path + "\n" + json.dumps(fields, ensure_ascii=False, allow_nan=False)
         self.records[node["id"]] = {"text": text, "path": path, "fields": fields,
-            "method": "structural-record-v2", "field_paths": paths or {}, "components": [
+            "method": "structural-record-v1", "components": [
                 {"node_id": n["id"], "locator": n["locator"], "properties": n["properties"]}
                 for n in {n["id"]: n for n in components}.values()]}
 
@@ -125,9 +108,9 @@ class DocumentViews:
         if not record:
             return {}
         output = {PROPERTY: record}
+        identity_keys = {"id", "name", "nome", "project", "projeto", "sensor", "item", "product", "produto", "person", "pessoa", "user", "usuario", "code", "codigo"}
         from .model import normalized
-        identifiers = {k: v for k, v in record["fields"].items()
-                       if normalized(record["field_paths"].get(k, [k])[-1]) in IDENTITY_KEYS}
+        identifiers = {k: v for k, v in record["fields"].items() if normalized(k).rsplit(".", 1)[-1] in identity_keys}
         if not identifiers:
             first = next(iter(record["fields"]))
             identifiers = {first: record["fields"][first]}
@@ -135,25 +118,5 @@ class DocumentViews:
             fields = {**identifiers, key: value}
             output[FIELD_PREFIX + key.encode("utf-8").hex()] = {**record,
                 "text": "Registro " + record["path"] + "\n" + json.dumps(fields, ensure_ascii=False, allow_nan=False),
-                "fields": fields, "identity_fields": identifiers, "target_field": key,
-                "target_path": record["field_paths"].get(key), "target_value": value}
+                "fields": fields, "target_field": key, "target_value": value}
         return output
-
-    def resolve_property(self, node_id, prop):
-        if prop.startswith(("projection:record-v1", "projection:field-v1:")):
-            # Old evidence is immutable and remains verifiable. It is not
-            # indexed or selected as new answer support.
-            from .views_v1 import DocumentViews as LegacyViews
-            if not hasattr(self, "_legacy"):
-                self._legacy = LegacyViews(self.document)
-            return self._legacy.properties(node_id).get(prop)
-        return self.properties(node_id).get(prop)
-
-
-def for_occurrence(ledger, occurrence):
-    cache = getattr(ledger, "_record_views", None)
-    if cache is None:
-        cache = ledger._record_views = {}
-    if occurrence["id"] not in cache:
-        cache[occurrence["id"]] = DocumentViews(occurrence["document"])
-    return cache[occurrence["id"]]

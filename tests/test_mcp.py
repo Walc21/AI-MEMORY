@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 from mimir import Memory
+from BN1_1.Pacote.cache import Pacote
 from mimir.mcp_server import token_create, _token
 from Transformer_Core.semantic.model import SemanticError
 
@@ -61,6 +62,65 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(resource.contents)
                     invalid = await session.call_tool("memory_query", {"question": "Alice", "budget_chars": 999999})
                     self.assertTrue(invalid.isError)
+
+    async def test_audited_absences_cross_the_real_memory_mcp(self):
+        self.memory.episode("Maria Clara works at Acme.\nJoão trabalhava na Acme em 2020.")
+        source = self.root / "people.json"
+        source.write_text(json.dumps({"a": {"name": "Alice", "salary": 100}, "b": {"name": "Bob", "password": "SECRET"}}))
+        runtime = self.root / "runtime"
+        package = Pacote(runtime)
+        package.open()
+        package.add([source])
+        self.memory.ingest(runtime)
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        with tempfile.TemporaryFile(mode="w+") as errors:
+            async with stdio_client(StdioServerParameters(command=sys.executable, args=self.args(), cwd=str(ROOT)), errlog=errors) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    for q in ["Where does Clara Maria work?", "What is the password of Alice?", "Onde João trabalha?"]:
+                        result = await session.call_tool("memory_query", {"question": q, "valid_at": "2026"})
+                        self.assertFalse(result.isError)
+                        self.assertTrue(result.structuredContent["abstained"], q)
+                        self.assertEqual(result.structuredContent["answer_evidence"], [])
+                        self.assertEqual(result.structuredContent["context"]["untrusted_evidence"], [])
+                    positive = await session.call_tool("memory_query", {"question": "What is the password of Bob?"})
+                    self.assertFalse(positive.isError)
+                    self.assertIn("SECRET", positive.structuredContent["answer"])
+
+    async def test_complete_input_cycle_crosses_real_io_mcp(self):
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        from mimir.io import Channels
+        from test_io_core import folder, metadata
+        from test_audit_input_cycles import remote
+        data = b"Alice works at Acme.\n"
+        meta = metadata(data)
+        with tempfile.TemporaryFile(mode="w+") as errors:
+            async with stdio_client(StdioServerParameters(command=sys.executable, args=self.args("io"), cwd=str(ROOT)), errlog=errors) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    configured = await session.call_tool("io_configure", {"root": folder("home"), "incoming": folder("incoming", "home"), "outgoing": folder("outgoing", "home"), "account_email": "test@example.com"})
+                    self.assertFalse(configured.isError)
+                    begin = await session.call_tool("io_begin_input", {"before": meta})
+                    self.assertFalse(begin.isError)
+                    other = await session.call_tool("io_begin_input", {"before": metadata(data, id="source-2")})
+                    self.assertTrue(other.isError)
+                    staged = Channels(self.memory).stage(data)
+                    ingested = await session.call_tool("io_ingest_file", {"staged_path": str(staged), "before": meta, "after": meta})
+                    self.assertFalse(ingested.isError)
+                    pending = await session.call_tool("io_pending")
+                    job = pending.structuredContent["jobs"][0]
+                    insufficient = remote(job)
+                    del insufficient["folder_validation"]
+                    refused = await session.call_tool("io_acknowledge", {"output_id": job["id"], "remote_metadata": insufficient})
+                    self.assertTrue(refused.isError)
+                    ack = await session.call_tool("io_acknowledge", {"output_id": job["id"], "remote_metadata": remote(job)})
+                    self.assertFalse(ack.isError)
+                    status = await session.call_tool("io_status")
+                    self.assertEqual(status.structuredContent["input_cycle"]["phase"], "CLOSED")
+        self.assertTrue(self.memory.verify()["verified"])
+        self.assertFalse((Channels(self.memory).inputs / ingested.structuredContent["id"] / "runtime").exists())
 
     async def test_stdio_io_accepts_system_output_and_restarts_with_same_queue(self):
         from mcp import ClientSession, StdioServerParameters

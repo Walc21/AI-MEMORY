@@ -126,6 +126,22 @@ def build_server(memory, role="memory", allow_write=False, host="127.0.0.1", por
             return channels.configure(root, incoming, outgoing, account_email)
 
         @server.tool(annotations=write)
+        def io_begin_input(before: dict) -> dict[str, Any]:
+            """Admit one remote revision before downloading; reuse COMPLETE revisions.
+
+            Finish pending output/cleanup before admitting a different Input.
+            """
+            return channels.begin_input(before)
+
+        @server.tool(annotations=write)
+        def io_cancel_download(input_key: str) -> dict[str, Any]:
+            """Cancel only an abandoned pre-processing download with the expected input_key.
+
+            A cycle with admitted bytes or canonical ingestion cannot be canceled.
+            """
+            return channels.cancel_download(input_key)
+
+        @server.tool(annotations=write)
         def io_ingest_file(staged_path: str, before: dict, after: dict) -> dict[str, Any]:
             """Ingest inside authorized staging, verifying pre/post download Drive metadata."""
             return channels.ingest_file(Path(staged_path), before, after)
@@ -142,7 +158,12 @@ def build_server(memory, role="memory", allow_write=False, host="127.0.0.1", por
 
         @server.tool(annotations=write)
         def io_acknowledge(output_id: str, remote_metadata: dict) -> dict[str, Any]:
-            """Confirm delivery only after Drive readback verifies folder, size and checksum."""
+            """Confirm readback with size/checksum, ownedByMe:true, shared:false and folder_validation.
+
+            folder_validation contains the current account_fingerprint and freshly read
+            root/incoming/outgoing folder metadata. Confirmation closes and cleans a
+            completed Input cycle; missing or changed privacy leaves output pending.
+            """
             return channels.acknowledge(output_id, remote_metadata)
 
         @server.tool(annotations=write)

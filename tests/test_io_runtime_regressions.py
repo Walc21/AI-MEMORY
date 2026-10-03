@@ -12,7 +12,7 @@ from mimir.io import Channels, IOError
 
 
 def folder(identity, parent=None):
-    return {"id": identity, "mimeType": "application/vnd.google-apps.folder", "parents": [parent] if parent else ["root"]}
+    return {"id": identity, "mimeType": "application/vnd.google-apps.folder", "parents": [parent] if parent else ["root"], "trashed": False, "ownedByMe": True, "shared": False}
 
 
 class InputCheckpointTests(unittest.TestCase):

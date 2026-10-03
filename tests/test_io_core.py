@@ -17,7 +17,13 @@ from Transformer_Core.structural.model import fingerprint
 
 
 def folder(identity, parent=None):
-    return {"id": identity, "name": identity, "mimeType": "application/vnd.google-apps.folder", "parents": [parent] if parent else ["root"], "trashed": False}
+    return {"id": identity, "name": identity, "mimeType": "application/vnd.google-apps.folder", "parents": [parent] if parent else ["root"], "trashed": False, "ownedByMe": True, "shared": False}
+
+
+def validation():
+    from mimir.io.model import account_fingerprint
+    return {"account_fingerprint": account_fingerprint("test@example.com"), "root": folder("home"),
+            "incoming": folder("incoming", "home"), "outgoing": folder("outgoing", "home")}
 
 
 def metadata(data=b"Alice works at Acme.\n", **values):
@@ -41,7 +47,7 @@ class ChannelTests(unittest.TestCase):
         return self.io.ingest_file(self.io.stage(data), meta, deepcopy(meta))
 
     def remote(self, job, **changes):
-        return {"id": "remote-1", "name": job["file_name"], "parents": ["outgoing"], "size": str(job["size"]), "md5Checksum": job["md5"], "trashed": False, **changes}
+        return {"id": "remote-1", "name": job["file_name"], "parents": ["outgoing"], "size": str(job["size"]), "md5Checksum": job["md5"], "trashed": False, "ownedByMe": True, "shared": False, "folder_validation": validation(), **changes}
 
     def test_ingestion_links_drive_revision_to_explanation_and_is_idempotent(self):
         receipt = self.ingest()
@@ -56,6 +62,8 @@ class ChannelTests(unittest.TestCase):
 
     def test_remote_revision_adds_history_without_erasing_source(self):
         first = self.ingest()
+        job = self.io.pending()[0]
+        self.io.acknowledge(job["id"], self.remote(job))
         second = self.ingest(b"Alice works at Beta.\n", version="2")
         self.assertNotEqual(first["semantic_generation"], second["semantic_generation"])
         self.assertEqual(len(self.memory.inspect("assertions")), 2)
@@ -107,6 +115,8 @@ class ChannelTests(unittest.TestCase):
 
     def test_remote_name_cannot_collide_with_local_receipt_or_runtime(self):
         self.assertEqual(self.ingest(name="receipt.json")["status"], "COMPLETE")
+        job = self.io.pending()[0]
+        self.io.acknowledge(job["id"], self.remote(job))
         self.assertEqual(self.ingest(name="runtime", id="source-2")["status"], "COMPLETE")
 
     def test_payload_published_without_receipt_recovers_after_restart(self):
@@ -177,6 +187,7 @@ class FakeDrive:
     def __init__(self):
         self.rows = {row["id"]: row for row in (folder("home"), folder("incoming", "home"), folder("outgoing", "home"), metadata())}
         self.downloads = self.uploads = 0
+        self.reservations = 0
         self.lose_response = False
 
     def profile(self):
@@ -193,13 +204,14 @@ class FakeDrive:
         return b"Alice works at Acme.\n"
 
     def reserve(self):
-        return "reserved-1"
+        self.reservations += 1
+        return f"reserved-{self.reservations}"
 
     def upload(self, job, config, path):
         identity = job["remote_reserved_id"]
         if identity not in self.rows:
             self.uploads += 1
-            self.rows[identity] = {"id": identity, "name": job["file_name"], "parents": ["outgoing"], "size": str(job["size"]), "sha256Checksum": job["sha256"]}
+            self.rows[identity] = {"id": identity, "name": job["file_name"], "parents": ["outgoing"], "size": str(job["size"]), "sha256Checksum": job["sha256"], "trashed": False, "ownedByMe": True, "shared": False}
         if self.lose_response:
             self.lose_response = False
             raise IOError("response lost")

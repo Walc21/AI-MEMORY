@@ -8,10 +8,11 @@ import re
 
 from .evidence import node_for, reference, resolve, texts
 from .extraction import rule_claims
-from .language import spans, terms, uncertain
+from .language import attribute_identity, contains_name, spans, terms, uncertain
 from .model import normalized
 from .resolution import latest_resolutions
 from .views import FIELD_PREFIX, PROPERTY, for_occurrence
+from .temporal import covers_excerpt_time
 
 RELATION_TERMS = {"works_at": {"work"}, "lives_in": {"live"},
                   "born_in": {"born"}, "responsible_for": {"responsible"}}
@@ -26,9 +27,12 @@ def intent(query):
     if not relation and (re.search(r"^quem\s+.+\s+e\??$", value) or re.search(r"^(?:who|what)\s+is\s+\w+[?]?$", value)):
         relation = "is"
     temporal = bool(re.search(r"\b(?:quando|when|data|date|ano|year)\b", value))
+    dates = re.findall(r"\b(?:em|in|desde|since|ano|year|entre|between)\s+(\d{4}(?:-\d{2}-\d{2})?)\b", query, re.IGNORECASE)
+    for date in dates:
+        query_terms -= terms(date)
     if temporal:
         query_terms -= {"data", "date", "ano", "year"}
-    return {"question": bool(re.search(QUESTION, value) or "?" in query),
+    return {"text": query, "dates": dates, "question": bool(re.search(QUESTION, value) or "?" in query),
             "terms": query_terms, "predicate": relation,
             "time": temporal,
             "place": bool(re.search(r"\b(?:onde|where|lugar|place|cidade|city)\b", value)),
@@ -65,6 +69,8 @@ def proven_claim(ledger, assertion):
 
 
 def matches_claim(request, parsed):
+    if request["dates"] and not parsed["valid_from"]:
+        return False
     if re.search(r"\b(?:unknown|unavailable|desconhecid[oa]|indispon[ií]vel|n[aã]o\s+(?:informad[oa]|registrad[oa]))\b", parsed["object"], re.IGNORECASE):
         return False
     if parsed["polarity"] == "negative" and (request["place"] or request["time"]):
@@ -74,10 +80,15 @@ def matches_claim(request, parsed):
     if request["question"]:
         subject_terms = terms(parsed["subject"])
         if request["predicate"]:
-            if not subject_terms <= request["terms"] and not request["reverse"]:
+            if not request["reverse"] and not contains_name(request["text"], parsed["subject"]):
                 return False
         elif parsed["predicate"] != "is" or request["terms"] != subject_terms or re.search(r"\b(?:and|e|or|ou)\b|;", parsed["subject"], re.IGNORECASE):
             return False
+        elif not contains_name(request["text"], attribute_identity(parsed["subject"]) or parsed["subject"]):
+            return False
+        if parsed["object_type"] == "entity" and terms(parsed["object"]) & request["terms"]:
+            if not contains_name(request["text"], parsed["object"]):
+                return False
     if request["time"]:
         if parsed["predicate"] == "born_in":
             if not parsed["valid_from"] and not re.fullmatch(r"\d{4}(?:-\d{2}-\d{2})?", parsed["object"]):
@@ -91,7 +102,36 @@ def matches_claim(request, parsed):
     return bool(request["terms"]) and request["terms"] <= terms(parsed["quote"])
 
 
-def select(ledger, eligible, rows, query, as_of=None, audit=False):
+def field_matches(request, view):
+    """A field must belong to the ordered record identifier being requested."""
+    target = view["target_value"]
+    if request["dates"] and not all(date in view["text"] for date in request["dates"]):
+        return False
+    if target is None or target == "" or uncertain(str(target)):
+        return False
+    if not terms(view["target_field"]) & request["terms"] or not request["terms"] <= terms(view["text"]):
+        return False
+    if not any(value is not None and contains_name(request["text"], value)
+               for value in view["identity_fields"].values()):
+        return False
+    for value in view["identity_fields"].values():
+        if terms(str(value)) & request["terms"] and not contains_name(request["text"], value):
+            return False
+    # JSON Pointer paths are unambiguous; a literal dotted key is not a
+    # flattened nested path. Prefer an explicitly requested literal key.
+    path = view.get("target_path")
+    if path:
+        pointers = re.findall(r"(?<!\w)/[^\s?]+", request["text"])
+        if pointers and view["target_field"] not in pointers:
+            return False
+        literals = {p[-1] for p in view["field_paths"].values()
+                    if "." in p[-1] and contains_name(request["text"], p[-1])}
+        if literals and path[-1] not in literals:
+            return False
+    return True
+
+
+def select(ledger, eligible, rows, query, as_of=None, audit=False, valid_at=None):
     request = intent(aliases(ledger, query, as_of))
     accepted, claim_ids = {}, set()
     if request["unsupported"]:
@@ -108,7 +148,7 @@ def select(ledger, eligible, rows, query, as_of=None, audit=False):
         # Exactly one permitted two-edge relation chain; PPR alone is no proof.
         subject_terms = request["terms"] - {"work", "live", "company", "employer", "fica"}
         for first, a in verified.items():
-            if a["predicate"] != "works_at" or a["polarity"] != "positive" or not subject_terms or not subject_terms <= terms(a["subject"]):
+            if a["predicate"] != "works_at" or a["polarity"] != "positive" or not subject_terms or not subject_terms <= terms(a["subject"]) or not contains_name(request["text"], a["subject"]):
                 continue
             for second, b in verified.items():
                 if b["predicate"] == "lives_in" and b["polarity"] == "positive" and normalized(a["object"]) == normalized(b["subject"]):
@@ -131,9 +171,7 @@ def select(ledger, eligible, rows, query, as_of=None, audit=False):
                 if request["terms"] and request["terms"] <= terms(view["text"]):
                     evidence.append(reference(ledger, ev["binding_id"], ev["property"], view["text"]))
             elif request["question"] and ev["property"].startswith(FIELD_PREFIX):
-                target = view["target_value"]
-                field_terms = terms(view["target_field"])
-                if target is not None and target != "" and not uncertain(str(target)) and field_terms & request["terms"] and request["terms"] <= terms(view["text"]):
+                if field_matches(request, view):
                     evidence.append(reference(ledger, ev["binding_id"], ev["property"], view["text"]))
         elif not request["multi_hop"]:
             if ev["property"].startswith("observation:"):
@@ -146,6 +184,10 @@ def select(ledger, eligible, rows, query, as_of=None, audit=False):
                 if any(start < hi and end > lo for start, end in blocked.get((ev["binding_id"], ev["property"]), [])):
                     continue
                 sentence = full_text[lo:hi]
+                if not covers_excerpt_time(sentence, valid_at):
+                    continue
+                if request["dates"] and not re.search(r"\b(?:em|in|desde|since|entre|between)\s+\d{4}", sentence, re.IGNORECASE):
+                    continue
                 if not request["terms"] or not request["terms"] <= terms(sentence):
                     continue
                 if not request["question"]:
@@ -158,7 +200,8 @@ def select(ledger, eligible, rows, query, as_of=None, audit=False):
                     missing = re.search(r"\b(?:unknown|unavailable|desconhecid[oa]|indispon[ií]vel|n[aã]o\s+(?:informad[oa]|registrad[oa]|dispon[ií]vel)|not\s+(?:known|recorded|available))\b", tail, re.IGNORECASE)
                     prefix = sentence[:marker.start()] if marker else ""
                     compound = re.search(r"\b(?:and|e|or|ou)\b|;", prefix, re.IGNORECASE)
-                    if marker and terms(prefix) == request["terms"] and terms(tail) - request["terms"] and not missing and not compound:
+                    prefix_identity = attribute_identity(prefix)
+                    if marker and prefix_identity and contains_name(request["text"], prefix_identity) and terms(prefix) == request["terms"] and terms(tail) - request["terms"] and not missing and not compound:
                         evidence.append(reference(ledger, ev["binding_id"], ev["property"], full_text, lo, hi))
         if evidence:
             unique = {(e["binding_id"], e["property"], e["char_start"], e["char_end"]): e for e in evidence}

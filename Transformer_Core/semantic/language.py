@@ -26,6 +26,31 @@ def terms(text):
     return {ALIASES.get(t, t) for t in re.findall(r"\w+", normalized(text)) if t not in NOISE}
 
 
+def contains_name(text, name):
+    """Identity requires the complete ordered surface, never a bag of words."""
+    label = normalized(str(name)).strip()
+    if not label:
+        return False
+    pattern = r"\s+".join(re.escape(part) for part in label.split())
+    return bool(re.search(r"(?<!\w)" + pattern + r"(?!\w)", normalized(text)))
+
+
+def attribute_identity(prefix):
+    """Strip only known attribute vocabulary at the edges of a declaration.
+
+    Keep the internal surface (including name particles and order) intact.
+    Unknown attribute syntax can abstain rather than weaken identity matching.
+    """
+    words = list(re.finditer(r"\w+", normalized(prefix)))
+    fields = set(ALIASES) | set(ALIASES.values())
+    lo, hi = 0, len(words)
+    while lo < hi and words[lo].group() in fields | NOISE:
+        lo += 1
+    while hi > lo and words[hi - 1].group() in fields | NOISE:
+        hi -= 1
+    return normalized(prefix)[words[lo].start():words[hi - 1].end()] if lo < hi else ""
+
+
 def spans(text):
     """Exact sentence/line spans, retaining decimals and punctuation."""
     for match in re.finditer(r".+?(?:[.!?](?=\s|$)|\n|$)", text, re.DOTALL):

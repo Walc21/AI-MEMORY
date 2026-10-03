@@ -8,8 +8,9 @@ from .graph import personalized_pagerank
 from .indexes import Index, tokens
 from .model import SemanticError, timestamp
 from .resolution import active_at
-from .grounding import intent, select
+from .grounding import intent, proven_claim, select
 from .revisions import current_bindings
+from .temporal import covers_source_time
 
 
 def plan(query, valid_at=None, history=False):
@@ -17,7 +18,8 @@ def plan(query, valid_at=None, history=False):
         raise SemanticError("Consulta deve conter de 1 a 10000 caracteres.")
     if valid_at is None and not history:
         dates = re.findall(r"\b(?:em|in|desde|since|ano|year|entre|between)\s+(\d{4}(?:-\d{2}-\d{2})?)\b", query, re.IGNORECASE)
-        valid_at = dates[-1] if dates else datetime.now(timezone.utc).date().isoformat()
+        historical = re.search(r"\b(?:trabalhava|trabalhou|worked|morava|morou|lived|was|were|era)\b|\bdid\b.*\b(?:work|live)\b", query, re.IGNORECASE)
+        valid_at = dates[-1] if dates else None if historical or not intent(query)["question"] else datetime.now(timezone.utc).date().isoformat()
     if valid_at:
         from .resolution import valid_time
         valid_time(valid_at)
@@ -60,7 +62,8 @@ def search(store, manifest, ledger, query, k=8, valid_at=None, as_of=None, histo
             continue
         if not history and assertion["id"] in invalid:
             continue
-        if active_at(assertion["valid_time"], query_plan["valid_at"]):
+        parsed = proven_claim(ledger, assertion)
+        if active_at(assertion["valid_time"], query_plan["valid_at"]) and (parsed is None or covers_source_time(parsed, query_plan["valid_at"])):
             eligible[assertion["id"]] = assertion
     if as_of:
         known_entities = {ledger.get("propositions", row["proposition_id"])["subject"] for row in eligible.values()}
@@ -97,7 +100,7 @@ def search(store, manifest, ledger, query, k=8, valid_at=None, as_of=None, histo
                 scores[identity] = scores.get(identity, 0) + weight / (60 + rank)
                 channels.setdefault(identity, []).append(name)
     query_terms = set(tokens(query))
-    supported, supported_ids, sufficiency = select(ledger, eligible, rows, query, as_of, audit)
+    supported, supported_ids, sufficiency = select(ledger, eligible, rows, query, as_of, audit, query_plan["valid_at"])
     # Search-score cutoffs are retrieval hints, never proof. Check every
     # eligible row already loaded by the vector scan before limiting to k.
     for identity in supported:
@@ -201,6 +204,14 @@ def search(store, manifest, ledger, query, k=8, valid_at=None, as_of=None, histo
         if remaining <= 0:
             break
         summary = row["summary"]
+        remainder = summary
+        for quote in sorted({c["quote"] for c in answer_evidence}, key=len, reverse=True):
+            remainder = remainder.replace(quote, "")
+        if remainder.strip():
+            # A binding/episode may span unrelated fields or sibling records.
+            # Old derivations remain stored, but only selected complete source
+            # units may enter the factual context of this answer.
+            continue
         if len(summary) > remaining:
             continue
         used += len(summary)

@@ -231,15 +231,12 @@ class DriveSync:
         profile = self.api.profile()
         if account_fingerprint(profile["emailAddress"]) != config["account_fingerprint"]:
             raise IOError("Conta da API difere da conta autenticada vinculada ao namespace.")
-        for key in ("root_folder_id", "input_folder_id", "output_folder_id"):
+        validation = {"account_fingerprint": account_fingerprint(profile["emailAddress"])}
+        for key, label in (("root_folder_id", "root"), ("input_folder_id", "incoming"), ("output_folder_id", "outgoing")):
             metadata = self.api.metadata(config[key])
-            if metadata.get("trashed") or metadata.get("mimeType") != "application/vnd.google-apps.folder":
-                raise IOError("Pasta configurada foi removida ou alterada.")
-            if metadata.get("shared") or metadata.get("ownedByMe") is False:
-                raise IOError("Pasta configurada deixou de ser privada da conta vinculada.")
-            if key != "root_folder_id" and config["root_folder_id"] not in metadata.get("parents", []):
-                raise IOError("Entrada/saída saiu da raiz autorizada.")
-        return profile
+            self.channels.private_folder(metadata, config[key], None if label == "root" else config["root_folder_id"])
+            validation[label] = metadata
+        return validation
 
     def bootstrap(self):
         with self.channels.locked(write=True):
@@ -253,44 +250,80 @@ class DriveSync:
             outgoing = self.api.folder("Saída", root["id"])
         return self.channels.configure(root, incoming, outgoing, profile["emailAddress"], "api")
 
+    def _deliver(self, config, delivered, failures):
+        for job in self.channels.pending(limit=10000):
+            try:
+                # Re-read before each upload and again before acknowledgment.
+                # A privacy/account change strands the output safely in PENDING.
+                self.identity(config)
+                if job["status"] == "DELIVERED":
+                    # A v0.5.0 receipt proves checksums but lacked privacy proof.
+                    # Revalidate the existing object without another upload.
+                    remote = job["remote"]
+                else:
+                    if job["remote_reserved_id"] is None:
+                        job = {**self.channels.reserve(job["id"], self.api.reserve()), "local_path": job["local_path"]}
+                    self.identity(config)
+                    remote = self.api.upload(job, config, Path(job["local_path"]))
+                remote = self.api.metadata(remote["id"])
+                validation = self.identity(config)
+                delivered.append(self.channels.acknowledge(job["id"], {**remote, "folder_validation": validation}))
+            except (SemanticError, OSError, ValueError) as exc:
+                failures.append({"output_id": job["id"], "error": str(exc) if isinstance(exc, IOError) else type(exc).__name__})
+                return False
+        return True
+
     def sync(self, **settings):
+        with self.channels.transfer_locked():
+            return self._sync(**settings)
+
+    def _sync(self, **settings):
         with self.channels.locked():
             config = self.channels.config()
         self.identity(config)
         accepted, skipped, failures = [], [], []
+        delivered = []
+        self.channels.recover_cycle()
+        if not self._deliver(config, delivered, failures):
+            return {"schema": "mimir.drive-sync.v1", "backend": "api", "accepted": accepted,
+                    "delivered": delivered, "skipped": skipped, "failures": failures, "complete": False}
         try:
             for item in self.api.files(config["input_folder_id"], self.channels.limits.max_sync_files):
                 if item["mimeType"] == "application/vnd.google-apps.folder":
                     skipped.append({"file_id": item["id"], "reason": "direct_children_only"})
                     continue
                 path = None
+                before = None
                 try:
                     before = self.api.metadata(item["id"])
                     self.channels._input_metadata(before)
                     if not settings.get("force") and self.channels.processed(before):
                         skipped.append({"file_id": item["id"], "reason": "unchanged_revision"})
                         continue
+                    self.identity(config)
+                    self.channels.claim_download(before)
                     data = self.api.download(before, self.channels.limits.max_file_bytes)
                     after = self.api.metadata(item["id"])
                     path = self.channels.stage(data)
                     accepted.append(self.channels.ingest_file(path, before, after, **settings))
+                    if not self._deliver(config, delivered, failures):
+                        break
                 except (SemanticError, StructuralError, CacheError, HubError, OSError, ValueError) as exc:
                     failures.append({"file_id": item["id"], "error": str(exc) if isinstance(exc, IOError) else type(exc).__name__})
+                    break
                 finally:
                     if path is not None:
                         path.unlink(missing_ok=True)
+                    if before is not None:
+                        self.channels.release_download(before)
         except (SemanticError, OSError, ValueError) as exc:
             # A partial or unavailable inbox must not strand previously queued outputs.
             failures.append({"input_folder_id": config["input_folder_id"],
                              "error": str(exc) if isinstance(exc, IOError) else type(exc).__name__})
-        delivered = []
-        for job in self.channels.pending(limit=10000):
-            try:
-                if job["remote_reserved_id"] is None:
-                    job = {**self.channels.reserve(job["id"], self.api.reserve()), "local_path": job["local_path"]}
-                remote = self.api.upload(job, config, Path(job["local_path"]))
-                delivered.append(self.channels.acknowledge(job["id"], remote))
-            except (SemanticError, OSError, ValueError) as exc:
-                failures.append({"output_id": job["id"], "error": str(exc) if isinstance(exc, IOError) else type(exc).__name__})
+        if not failures:
+            self._deliver(config, delivered, failures)
+        cycle = self.channels.status()["input_cycle"]
+        if cycle and cycle["phase"] != "CLOSED" and not failures:
+            failures.append({"input_job_id": cycle["input_job_id"], "error": "Ciclo ativo requer retomada da entrada, entrega ou limpeza."})
         return {"schema": "mimir.drive-sync.v1", "backend": "api", "accepted": accepted,
                 "delivered": delivered, "skipped": skipped, "failures": failures, "complete": not failures}

@@ -15,6 +15,8 @@ def parsers(commands, extraction):
     io = commands.add_parser("io", help="Canais persistentes de entrada e saída")
     sub = io.add_subparsers(dest="io_command", required=True)
     sub.add_parser("status")
+    cancel = sub.add_parser("cancel-download", help="Cancela download interrompido antes do processamento")
+    cancel.add_argument("input_key")
     configure = sub.add_parser("configure", help="Vincula metadados verificados pelo plugin Drive")
     configure.add_argument("metadata", type=Path, help="JSON com root, incoming, outgoing e account_email")
     ingest = sub.add_parser("ingest", help="Ingere arquivo já materializado em staging")
@@ -70,6 +72,8 @@ def dispatch(args, memory):
         cmd = args.io_command
         if cmd == "status":
             return channels.status()
+        if cmd == "cancel-download":
+            return channels.cancel_download(args.input_key)
         if cmd == "configure":
             values = read_json(args.metadata)
             required = {"root", "incoming", "outgoing", "account_email"}

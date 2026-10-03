@@ -72,7 +72,8 @@ def resolve(ledger: Ledger, evidence: dict) -> dict:
     else:
         from .views import for_occurrence
         view = for_occurrence(ledger, occurrence) if prop.startswith("projection:") else None
-        text = dict(texts(node, view)).get(prop)
+        projection = view.resolve_property(node["id"], prop) if view else None
+        text = projection["text"] if projection else dict(texts(node)).get(prop)
     start, end = evidence["char_start"], evidence["char_end"]
     if not isinstance(text, str) or type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text):
         raise SemanticError("Span de evidência fora da propriedade de origem.")
@@ -86,7 +87,7 @@ def resolve(ledger: Ledger, evidence: dict) -> dict:
     if prop.startswith("observation:"):
         result["derived_observation"] = observation
     elif prop.startswith("projection:"):
-        result["structural_projection"] = view.properties(node["id"])[prop]
+        result["structural_projection"] = projection
     upstream = ledger.get("upstreams", occurrence["upstream_id"])
     for run in sorted(ledger.rows("inference_runs"), key=lambda row: row["timestamp"]):
         metadata = run["parameters"].get("source_metadata", {})

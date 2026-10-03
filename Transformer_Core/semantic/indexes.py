@@ -106,7 +106,7 @@ class Index:
         self.profile = {"schema": "mimir.index-profile.v1", "semantic_generation": manifest["generation"],
             "semantic_fingerprint": manifest["fingerprint"], "embedding": self.vector.profile,
             "chunking_profile": {"chars": 2000, "overlap": 200}, "index_algorithm": "sqlite-fts5+cosine+rrf+ppr",
-            "index_version": 2, "sqlite_version": sqlite3.sqlite_version}
+            "index_version": 3, "sqlite_version": sqlite3.sqlite_version}
         self.root = store.indexes / manifest["generation"] / fingerprint(self.profile)
         self.path = self.root / "catalog.sqlite3"
         self.manifest = self.root / "manifest.json"
