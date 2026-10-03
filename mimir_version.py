@@ -1,3 +1,3 @@
 """Application release version; individual data protocols retain their versions."""
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"

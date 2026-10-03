@@ -29,15 +29,21 @@ def node_for(ledger: Ledger, binding_id: str) -> tuple[dict, dict]:
     return occurrence, node
 
 
-def texts(node: dict):
+def texts(node: dict, views=None):
     properties = node["properties"]
     for key in ("text", "value"):
         if isinstance(properties.get(key), str) and properties[key]:
             yield key, properties[key]
+        elif key == "value" and key in properties and properties[key] is not None:
+            from .views import scalar
+            yield key, scalar(properties[key])
     for key in ("fields", "cells"):
         for index, value in enumerate(properties.get(key, [])):
             if isinstance(value, str) and value:
                 yield f"{key}.{index}", value
+    if views and node["id"] in views.records:
+        for prop, view in views.properties(node["id"]).items():
+            yield prop, view["text"]
 
 
 def reference(ledger: Ledger, binding_id: str, property_name: str, text: str, start=0, end=None) -> dict:
@@ -64,7 +70,9 @@ def resolve(ledger: Ledger, evidence: dict) -> dict:
             raise SemanticError("Observação multimodal de outra origem.")
         text = observation["text"]
     else:
-        text = dict(texts(node)).get(prop)
+        from .views import for_occurrence
+        view = for_occurrence(ledger, occurrence) if prop.startswith("projection:") else None
+        text = dict(texts(node, view)).get(prop)
     start, end = evidence["char_start"], evidence["char_end"]
     if not isinstance(text, str) or type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text):
         raise SemanticError("Span de evidência fora da propriedade de origem.")
@@ -77,6 +85,8 @@ def resolve(ledger: Ledger, evidence: dict) -> dict:
             "upstream_id": occurrence["upstream_id"]}
     if prop.startswith("observation:"):
         result["derived_observation"] = observation
+    elif prop.startswith("projection:"):
+        result["structural_projection"] = view.properties(node["id"])[prop]
     upstream = ledger.get("upstreams", occurrence["upstream_id"])
     for run in sorted(ledger.rows("inference_runs"), key=lambda row: row["timestamp"]):
         metadata = run["parameters"].get("source_metadata", {})

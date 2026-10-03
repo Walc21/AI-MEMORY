@@ -2,11 +2,13 @@
 
 [![CI](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml/badge.svg)](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
-[![Release](https://img.shields.io/badge/release-v0.4.1-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.4.1)
+[![Release](https://img.shields.io/badge/release-v0.5.0-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.5.0)
 
 **Memória local auditável: bytes → estrutura → evidências → afirmações temporais → consulta com fontes.**
 
-A **v0.4.1 corrige falhas de execução identificadas na auditoria do pipeline, da memória, dos canais Drive e dos MCPs**. Inclui a entrada e saída sincronizáveis da v0.4.0 e os dois MCPs de integração de dados e memória para harnesses. A revisão remota acompanha as evidências; saídas entram em uma fila persistente e só são confirmadas após verificar o arquivo publicado. A v0.3.0 implementou o Semantic Core sobre a fundação da v0.2.0. O [manual](docs/reference/semantic-core-manual.pdf) orienta o ledger e a recuperação; consulte o [guia de Drive e MCP](docs/drive-mcp.md) para conectar sua conta e seus agentes e o [relatório da auditoria](docs/runtime-audit-v0.4.1.md) para reproduções e correções.
+A **v0.5.0 corrige a passagem indevida de um resultado de busca para uma resposta factual**. A consulta exige suporte para a informação solicitada, conserva os vínculos entre registros e campos em JSON/tabelas e devolve trechos concisos com fontes. Uma pergunta sobre a cor de Alice se abstém quando a memória contém apenas seu emprego. Negação, histórico e limites de contexto são verificados antes da resposta. A mesma regra vale para Python, CLI, MCP e respostas enfileiradas no Drive.
+
+O pipeline original continua: preservação por arquivo no Hot Hub, chunks de 1.024 bytes, estrutura G_P/BN1_2 e interpretação semântica separada. A decisão de bytes/chunks de 29/09 substituiu a organização inicial por extensão; esta release não restaura Sorter/IDD. Consulte o [contrato de resposta e aceite](docs/grounded-memory-v0.5.0.md), o [manual](docs/reference/semantic-core-manual.pdf), o [guia de Drive/MCP](docs/drive-mcp.md) e a [auditoria anterior](docs/runtime-audit-v0.4.1.md).
 
 ```mermaid
 flowchart LR
@@ -21,7 +23,8 @@ flowchart LR
     B --> E[EvidenceAnchor / G_M]
     E --> S[Semantic Core / G_S]
     S --> R[Busca híbrida / contexto]
-    R --> O[Output Storage / resposta citada]
+    R --> V[Validação de suficiência]
+    V --> O[Output Storage / resposta ou abstenção]
     O --> Q[Outbox / recibo verificado]
     Q --> DS[Drive / Saída]
     R --> MCP[MCP de memória]
@@ -44,7 +47,7 @@ mimir query 'Onde João trabalha?' --text
 mimir verify
 ```
 
-Resposta: `Segundo a fonte: João trabalha na OpenAI em 2023.`, acompanhada da referência à fonte. Sem `--text`, a consulta retorna JSON com evidências, afirmações, tempos, plano de busca e contexto. Todos os comandos também aceitam `python -m mimir`.
+Resposta: `Segundo a fonte [1]: João trabalha na OpenAI em 2023.`, acompanhada da referência à fonte. Sem `--text`, a consulta retorna JSON com evidências, afirmações, tempos, plano de busca e contexto. Todos os comandos também aceitam `python -m mimir`.
 
 Para ingerir arquivos e salvar uma consulta:
 
@@ -111,7 +114,7 @@ Para HTTP autenticado, empacotamento do plugin, exportação de memória e opera
 | `resolve MENTION_ID 'Nome' --type person` | Registra uma resolução humana reversível da entidade. |
 | `episode TEXTO [--type interaction]` | Preserva interações como fontes e episódios persistentes. |
 | `working --json '{"objective":"..."}'` | Configura identidade, objetivo, projeto, restrições e compromissos. |
-| `consolidate [--type reflective]` | Cria resumos hierárquicos; tipos procedural e community disponíveis. |
+| `consolidate [--max-chars 1600] [--type reflective]` | Cria resumos extrativos limitados, sem duplicar frases nem cortar negação/unidades. |
 | `reindex` | Reconstrói as projeções sem alterar a memória canônica. |
 | `gc [--apply]` | Lista/remove tentativas órfãs e índices; preserva a cadeia canônica e os bytes. |
 | `verify` | Verifica gerações, histórico, hashes, grafos, inferências, spans e fontes. |
@@ -119,7 +122,21 @@ Para HTTP autenticado, empacotamento do plugin, exportação de memória e opera
 
 Assertions registram **o que a fonte relata**, com polaridade, `valid_time` e `transaction_time`. Conflitos permanecem visíveis; atualizações acrescentam relações, sem apagar afirmações anteriores. A resolução automática usa nomes normalizados exatos como candidatos. Aliases ambíguos requerem resolução explícita.
 
-A extração padrão reconhece padrões fechados em português e inglês: trabalho/entrada em organização, residência, nascimento, responsabilidade e descrições com “é/is”, incluindo negação e datas explícitas. Texto fora desses padrões permanece pesquisável como evidência. As respostas padrão citam as fontes ou se abstêm; a extração geral de linguagem natural depende de um modelo opcional.
+A extração padrão reconhece padrões fechados em português e inglês: trabalho/entrada em organização, residência, nascimento, responsabilidade e descrições com “é/is”, incluindo negação e datas explícitas. Texto fora desses padrões permanece pesquisável. A camada de resposta aceita relações verificadas, campos explícitos de um registro e atributos declarativos cujo sujeito/campo apareçam no mesmo trecho. Comparações, agregações, pedidos exaustivos e correferência implícita não são inferidos: podem causar abstenção mesmo com informação potencialmente relevante. Um modelo opcional não pode contornar o teste de suficiência.
+
+**Contrato do resultado:** `hits` contém candidatos de busca; `answer_evidence` contém as citações que sustentam a resposta; `claims` contém apenas afirmações verificadas e pertinentes; `sufficiency` explica suporte ou abstenção. Use `answer_evidence` e `context` ao fornecer dados ao harness. `abstained=true` exige abstenção, inclusive quando há hits. Os campos novos são aditivos ao schema v1; nenhum arquivo original é alterado.
+
+JSON preserva valores numéricos, booleanos, nulos, caminhos e fronteiras de registros. CSV/TSV e tabelas DOCX usam a primeira linha como cabeçalho quando seus rótulos são não vazios e distintos; XLSX conserva colunas esparsas e resultados existentes, sem executar fórmulas. As citações identificam `structural_projection` com os nós/localizadores usados para reconstruir o registro. Valores ausentes e fórmulas sem resultado armazenado não viram respostas.
+
+```bash
+mimir --runtime /tmp/lote-unico run notas.txt registros.json tabela.csv documento.pdf
+mimir query 'Qual orçamento do projeto Aurora?' --text
+mimir query 'Qual senha do projeto Aurora?' --text
+# Sem senha nos registros: "Não encontrei evidência suficiente na memória para responder."
+mimir consolidate --max-chars 1600
+```
+
+Fontes externas com `provider`, `file_id` e `revision` usam a revisão mais recente observada, priorizando `modified_time`. `--history` conserva as revisões anteriores; `--as-of` usa somente o conhecimento disponível naquele instante. Arquivos locais independentes não são substituídos por nome. Resumos são derivados e limitados; o canon conserva as fontes completas para não perder informação na compressão.
 
 A busca vetorial padrão usa **feature hashing de palavras e trigramas**, que mede semelhança lexical. Embeddings neurais são opcionais. As projeções SQLite são reconstruídas automaticamente quando ausentes ou corrompidas. Consultas trabalham com o ledger local inteiro; corpora muito grandes exigem dimensionamento e um índice vetorial especializado.
 
@@ -213,6 +230,8 @@ python -m unittest discover -s tests -v
 python -S -m unittest discover -s tests -p 'test_semantic_core.py' -v
 ```
 
-A CI verifica Python 3.10 e 3.12, o núcleo sem site-packages, OCR, assinaturas, instalação da CLI e regressões do pipeline anterior. O harness reporta cobertura de extração anotada, Recall@8, MRR, nDCG@8, categorias de tempo/multi-hop/atualização, conflito, abstention, resolubilidade da evidência, reconstrução de índices e latência. As métricas locais usam fixtures e correspondência de evidências; os adaptadores de LongMemEval/LoCoMo **não equivalem aos escores oficiais desses benchmarks**.
+A CI verifica Python 3.10 e 3.12, o núcleo sem site-packages, OCR, assinaturas, instalação da CLI e regressões do pipeline anterior. A suíte inclui um lote real com **TXT, Markdown, JSON, CSV, TSV, DOCX, XLSX, PDF e PNG/OCR**, 11 perguntas com resposta, 8 sem resposta e fontes distintas para cada informação, além de testes com 1, 40 e 1.000 registros distratores. As verificações julgam a resposta e `answer_evidence`, não apenas os hits. Uma nova versão só é publicada após todos os jobs de CI passarem e a wheel instalada fora do checkout demonstrar resposta e abstenção.
+
+O harness reporta cobertura de extração anotada, Recall@8, MRR, nDCG@8, categorias de tempo/multi-hop/atualização, conflito, abstention, resolubilidade da evidência, reconstrução de índices e latência. As métricas locais usam fixtures e correspondência de evidências; os adaptadores de LongMemEval/LoCoMo **não equivalem aos escores oficiais desses benchmarks**. Os testes não provam ausência universal de erros em linguagem arbitrária, volume ilimitado ou modelos ASR/visão não executados.
 
 Os [contratos e mapa S0–S15](docs/semantic-core.md), [chunks](docs/byte-chunks.md), [pipeline estrutural](docs/structural-pipeline.md), [referência visual](docs/images/mimir-pipeline-2026-09-28.jpg) e [changelog](CHANGELOG.md) detalham a implementação.

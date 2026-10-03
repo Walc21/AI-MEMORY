@@ -106,10 +106,12 @@ class Memory:
                     data = hub.reconstruct_snapshot(name, snapshot)
                     self.store.store_source(data, content_id(document["source"]["sha256"]))
                     occurrence, bindings = attach(ledger, document, upstream_id)
+                    from .views import for_occurrence
+                    views = for_occurrence(ledger, ledger.get("occurrences", occurrence))
                     passages = []
                     for node in document["nodes"]:
                         binding_id = bindings[node["id"]]
-                        passages.extend((binding_id, prop, text) for prop, text in texts(node))
+                        passages.extend((binding_id, prop, text) for prop, text in texts(node, views))
                         derived, error = observations(data, node, modes, limits)
                         if error:
                             errors.append({"source": name, "node_id": node["id"], "error": error})
@@ -252,31 +254,83 @@ class Memory:
                     invalid.add(reflection["id"])
                     changed = True
 
-    def consolidate(self, memory_type="reflective", max_items=20, signing_key=None):
+    def consolidate(self, memory_type="reflective", max_items=20, signing_key=None, max_chars=1600):
         if memory_type not in {"reflective", "procedural", "community"}:
             raise SemanticError("Tipo de consolidação inválido.")
         if type(max_items) is not int or not 1 <= max_items <= 1000:
             raise SemanticError("max_items deve estar entre 1 e 1000.")
+        if type(max_chars) is not int or not 256 <= max_chars <= 8000:
+            raise SemanticError("max_chars deve estar entre 256 e 8000.")
         def update(ledger):
+            from .language import spans
+            from .model import normalized
+            from .revisions import current_bindings
+            from .views import for_occurrence
             invalid = {row["object"] for row in ledger.rows("relations") if row["predicate"] in {"invalidates", "supersedes", "retracts"}}
-            units = [(row["id"], row["text"]) for row in ledger.rows("episodes")]
-            units += [(row["id"], row["evidence"][0]["quote"]) for row in ledger.rows("assertions") if row["id"] not in invalid]
+            invalid |= {row[k] for row in ledger.rows("relations") if row["predicate"] == "conflicts_with" for k in ("subject", "object")}
+            bindings = current_bindings(ledger)
+            units, seen = [], set()
+            def add(identity, text):
+                key = normalized(text)
+                if key not in seen and len(text) <= max_chars:
+                    seen.add(key)
+                    units.append((identity, text))
+            all_quotes = {normalized(ev["quote"]) for row in ledger.rows("assertions") for ev in row["evidence"]}
+            for row in ledger.rows("assertions"):
+                if row["id"] not in invalid and all(ev["binding_id"] in bindings for ev in row["evidence"]):
+                    add(row["id"], row["evidence"][0]["quote"])
+            for row in ledger.rows("episodes"):
+                if any(ev["binding_id"] not in bindings for ev in row["evidence"]):
+                    continue
+                for lo, hi in spans(row["text"]):
+                    text = row["text"][lo:hi]
+                    if normalized(text) not in all_quotes:
+                        add(row["id"], text)
+            for binding in ledger.rows("bindings"):
+                if binding["id"] not in bindings:
+                    continue
+                occurrence = ledger.get("occurrences", binding["occurrence_id"])
+                view = for_occurrence(ledger, occurrence).records.get(binding["node_id"])
+                if view:
+                    add(binding["id"], view["text"])
+                else:
+                    node = next(n for n in occurrence["document"]["nodes"] if n["id"] == binding["node_id"])
+                    text = node["properties"].get("text", "")
+                    for lo, hi in spans(text):
+                        sentence = text[lo:hi]
+                        if normalized(sentence) not in all_quotes:
+                            add(binding["id"], sentence)
             if not units:
                 raise SemanticError("Não há episódios/afirmações para consolidar.")
+            groups, group, size = [], [], 0
+            for item in units:
+                if group and (len(group) == max_items or size + len(item[1]) + 1 > max_chars):
+                    groups.append(group)
+                    group, size = [], 0
+                group.append(item)
+                size += len(item[1]) + 1
+            if group:
+                groups.append(group)
             previous = []
-            for index in range(0, len(units), max_items):
-                group = units[index:index + max_items]
-                summary = "\n".join(text[:500] for _, text in group)
+            for group in groups:
+                summary = "\n".join(text for _, text in group)
                 previous.append(ledger.put("reflections", summary=summary,
-                    dependencies=[identity for identity, _ in group], method="extractive_hierarchy_v1",
+                    dependencies=list(dict.fromkeys(identity for identity, _ in group)), method="concise_extractive_hierarchy_v2",
                     transaction_time=now(), level=1, memory_type=memory_type))
             level = 2
             while len(previous) > 1:
                 following = []
                 for index in range(0, len(previous), max(2, max_items)):
                     group = previous[index:index + max(2, max_items)]
-                    following.append(ledger.put("reflections", summary="\n".join(ledger.get("reflections", key)["summary"][:500] for key in group),
-                        dependencies=group, method="extractive_hierarchy_v1", transaction_time=now(),
+                    lines, size, seen_lines = [], 0, set()
+                    for key in group:
+                        line = ledger.get("reflections", key)["summary"]
+                        if line not in seen_lines and size + len(line) + bool(lines) <= max_chars:
+                            lines.append(line)
+                            seen_lines.add(line)
+                            size += len(line) + bool(len(lines) > 1)
+                    following.append(ledger.put("reflections", summary="\n".join(lines),
+                        dependencies=group, method="concise_extractive_hierarchy_v2", transaction_time=now(),
                         level=level, memory_type=memory_type))
                 previous, level = following, level + 1
         return self._update(update, "consolidate", signing_key)

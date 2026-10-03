@@ -71,6 +71,7 @@ def main(argv=None):
     consolidation = commands.add_parser("consolidate", help="Cria reflexões hierárquicas sem apagar origens")
     consolidation.add_argument("--type", choices=["reflective", "procedural", "community"], default="reflective")
     consolidation.add_argument("--max-items", type=int, default=20)
+    consolidation.add_argument("--max-chars", type=int, default=1600)
     consolidation.add_argument("--signing-key", type=Path)
     update = commands.add_parser("update", help="Registra supersession ou retratação explícita")
     update.add_argument("new_assertion")
@@ -124,8 +125,8 @@ def main(argv=None):
                 result["delivery"] = Channels(memory).enqueue(result, "answer", result["generation"])
             if args.text:
                 print(result["answer"])
-                for index, hit in enumerate(result["hits"], 1):
-                    print(f"[{index}] {hit['citation']['source_name']} — {json.dumps(hit['citation']['locator'], ensure_ascii=False)}")
+                for index, citation in enumerate(result["answer_evidence"], 1):
+                    print(f"[{index}] {citation['source_name']} — {json.dumps(citation['locator'], ensure_ascii=False)}")
                 return 0
         elif args.command == "verify":
             result = memory.verify()
@@ -138,7 +139,7 @@ def main(argv=None):
         elif args.command == "episode":
             result = memory.episode(args.text, args.type, **_settings(args))
         elif args.command == "consolidate":
-            result = memory.consolidate(args.type, args.max_items, args.signing_key)
+            result = memory.consolidate(args.type, args.max_items, args.signing_key, args.max_chars)
         elif args.command == "update":
             result = memory.relate(args.new_assertion, args.old_assertion, args.relation, args.signing_key)
         elif args.command == "resolve":

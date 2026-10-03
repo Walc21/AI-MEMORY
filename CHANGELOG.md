@@ -84,3 +84,13 @@ O pipeline avança do Hot Hub de bytes até uma entrega estrutural verificada ao
 - Extensões não suportadas, falhas de parser e limites de extração produzem documentos opacos por padrão; `--strict` recusa o lote. Tamanho acima do limite interrompe a transformação.
 
 Esta é a primeira release versionada publicada no repositório. A base anterior correspondia ao commit `fffbd13`, de 29/09/2026.
+# v0.5.0 - grounded concise memory
+
+- Separa candidatos de busca de evidência suficiente: perguntas sobre campos ausentes se abstêm mesmo quando a entidade está na memória.
+- Verifica sujeito, predicado, objeto, polaridade e tempo das relações reconhecidas; interpretações de modelo não podem contornar o gate de resposta.
+- Acrescenta projeções verificáveis de registros JSON, CSV/TSV e tabelas DOCX/XLSX, incluindo números, booleanos, cabeçalhos, colunas esparsas e fronteiras de registro.
+- Respostas extrativas usam frases/campos pertinentes; contexto e consolidação conservam unidades completas, sem cortes arbitrários, e resumos são deduplicados/limitados.
+- Aplica revisão corrente de documentos externos identificados, preservando `--history`, `--as-of` e todos os bytes históricos.
+- Acrescenta `answer_evidence`, `sufficiency` e `hits[].supports_answer`; CLI, MCP e publicação usam a mesma decisão. Avaliação passa a julgar evidência de resposta.
+- Aceite real em nove formatos, OCR Tesseract, fontes independentes, dados ausentes, 1/40/1000 distratores, corrupção, limites, revisão e exportação/reinício.
+- Publicação de versões vinculada ao sucesso da CI e a uma wheel validada fora do checkout.

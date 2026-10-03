@@ -1,0 +1,104 @@
+name: Publish validated release
+
+on:
+  workflow_run:
+    workflows: [Regression tests]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-validated-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Detect a reviewed version change
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, re, subprocess
+          text = pathlib.Path('mimir_version.py').read_text()
+          pattern = r'__version__ = "(\d+\.\d+\.\d+)"'
+          version = re.search(pattern, text).group(1)
+          old = subprocess.check_output(['git', 'show', 'HEAD^:mimir_version.py'], text=True)
+          previous = re.search(pattern, old).group(1)
+          exists = subprocess.run(['gh', 'release', 'view', 'v' + version], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+          changed = version != previous and not exists
+          if changed and not pathlib.Path('docs/releases/v' + version + '.md').is_file():
+              raise SystemExit('Release notes are required before publication')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\npublish={str(changed).lower()}\n')
+          PY
+      - name: Build wheel and portable plugin source
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          python -m pip install build
+          python -m build --wheel
+          python - <<'PY'
+          import pathlib, zipfile
+          from mimir_version import __version__
+          root = pathlib.Path('plugins/mimir-memory')
+          with zipfile.ZipFile(f'dist/mimir-memory-plugin-{__version__}.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(root.rglob('*')):
+                  if path.is_file():
+                      archive.write(path, 'mimir-memory/' + path.relative_to(root).as_posix())
+          PY
+          cd dist
+          sha256sum *.whl *.zip > SHA256SUMS.txt
+      - name: Verify installed wheel outside checkout
+        if: steps.version.outputs.publish == 'true'
+        run: |
+          python -m pip install dist/*.whl
+          task_dir=$(mktemp -d)
+          cd "$task_dir"
+          mimir episode 'Alice works at Acme.'
+          mimir query 'Where does Alice work?' > present.json
+          mimir query 'What is Alice favorite color?' > absent.json
+          python - <<'PY'
+          import json
+          present = json.load(open('present.json'))
+          absent = json.load(open('absent.json'))
+          assert not present['abstained'] and 'Acme' in present['answer']
+          assert absent['abstained'] and not absent['claims'] and not absent['answer_evidence']
+          PY
+          mimir verify
+      - name: Publish tag and release for the exact tested commit
+        if: steps.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          tag="v$RELEASE_VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null 2>&1; then
+            git fetch origin "refs/tags/$tag:refs/tags/$tag"
+            test "$(git rev-parse "$tag^{commit}")" = "$TESTED_SHA"
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git tag -a "$tag" "$TESTED_SHA" -m "Validated AI MEMORY release $tag"
+            git push origin "refs/tags/$tag"
+          fi
+          gh release create "$tag" dist/*.whl dist/*.zip dist/SHA256SUMS.txt --verify-tag \
+            --title "$tag — grounded concise memory" --notes-file "docs/releases/$tag.md"

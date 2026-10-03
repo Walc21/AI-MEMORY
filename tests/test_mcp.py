@@ -49,6 +49,12 @@ class MCPTests(unittest.IsolatedAsyncioTestCase):
                     data = result.structuredContent
                     self.assertLessEqual(data["context"]["chars"], 2000)
                     self.assertFalse(data["abstained"])
+                    for question in ["What is Alice favorite color?", "When was Alice born?", "Onde Bob trabalha?"]:
+                        absent = await session.call_tool("memory_query", {"question": question})
+                        self.assertFalse(absent.isError)
+                        self.assertTrue(absent.structuredContent["abstained"])
+                        self.assertEqual(absent.structuredContent["claims"], [])
+                        self.assertEqual(absent.structuredContent["context"]["untrusted_evidence"], [])
                     explained = await session.call_tool("memory_explain", {"assertion_id": data["claims"][0]["assertion_id"]})
                     self.assertTrue(explained.structuredContent["evidence"])
                     resource = await session.read_resource("mimir://working")

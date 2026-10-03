@@ -80,7 +80,8 @@ def passages(ledger, chunk_size=2000, overlap=200):
         occurrence, node = node_for(ledger, binding["id"])
         upstream = ledger.get("upstreams", occurrence["upstream_id"])
         transaction_time = known_at[upstream["bn_manifest"]["generation"]]
-        values = list(texts(node))
+        from .views import for_occurrence
+        values = list(texts(node, for_occurrence(ledger, occurrence)))
         values.extend(("observation:" + row["id"], row["text"]) for row in observations.get(binding["id"], []))
         for prop, text in values:
             known = transaction_time
@@ -105,7 +106,7 @@ class Index:
         self.profile = {"schema": "mimir.index-profile.v1", "semantic_generation": manifest["generation"],
             "semantic_fingerprint": manifest["fingerprint"], "embedding": self.vector.profile,
             "chunking_profile": {"chars": 2000, "overlap": 200}, "index_algorithm": "sqlite-fts5+cosine+rrf+ppr",
-            "index_version": 1, "sqlite_version": sqlite3.sqlite_version}
+            "index_version": 2, "sqlite_version": sqlite3.sqlite_version}
         self.root = store.indexes / manifest["generation"] / fingerprint(self.profile)
         self.path = self.root / "catalog.sqlite3"
         self.manifest = self.root / "manifest.json"
@@ -185,5 +186,6 @@ class Index:
                 if score >= (0.30 if self.vector.model else 0.18):
                     vector_scores.append((score, identity))
             dense = [identity for _, identity in sorted(vector_scores, key=lambda item: (-item[0], item[1]))[:k]]
-            names = [(identity, name) for identity, name in connection.execute("SELECT id,name FROM entities ORDER BY id") if name in normalized(query) or set(tokens(name)) <= set(terms)]
+            names = [(identity, name) for identity, name in connection.execute("SELECT id,name FROM entities ORDER BY id")
+                     if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", normalized(query))]
         return rows, [identity for identity in lexical if identity in rows], dense, names

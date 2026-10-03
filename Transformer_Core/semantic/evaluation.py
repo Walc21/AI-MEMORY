@@ -75,7 +75,9 @@ def evaluate(path=None):
             result = memory.query(case["question"], valid_at=case.get("at"), as_of=case.get("as_of"), history=case.get("history", False))
             latencies.append(time.perf_counter() - started)
             expected = case.get("expected", [])
-            quotes = [normalized(hit["citation"]["quote"]) for hit in result["hits"]]
+            # Judge what can actually support the answer, not merely retrieved
+            # candidates. Otherwise a wrong/abstained answer can score 1.0.
+            quotes = [normalized(citation["quote"]) for citation in result["answer_evidence"]]
             found = [any(normalized(value) in quote for quote in quotes) for value in expected]
             recall = sum(found) / len(found) if found else float(result["abstained"])
             recalls.append(recall)
