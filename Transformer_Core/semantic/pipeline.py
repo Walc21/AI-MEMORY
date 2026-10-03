@@ -44,6 +44,19 @@ class Memory:
                limits=None, force=False, ocr=False, ocr_language="eng", asr_model=None,
                strict_multimodal=False, signing_key=None, episode=None, vision_model=None, video_stride=30,
                source_metadata=None):
+        settings = locals().copy()
+        del settings["self"], settings["runtime"]
+        # The same namespace admission lock applies to CLI, MCP and Python.
+        # Channel ingestion re-enters its lock; independent inputs cannot pass
+        # an external cycle that is awaiting output or cleanup.
+        from mimir.io import Channels
+        with Channels(self).input_guard(Path(runtime)):
+            return self._ingest(runtime, **settings)
+
+    def _ingest(self, runtime: Path, extractor="rules", model=None, endpoint="http://127.0.0.1:11434",
+               limits=None, force=False, ocr=False, ocr_language="eng", asr_model=None,
+               strict_multimodal=False, signing_key=None, episode=None, vision_model=None, video_stride=30,
+               source_metadata=None):
         limits = limits or SemanticLimits()
         extraction = extractor_profile(extractor, model, endpoint)
         modes = multimodal_profile(ocr, ocr_language, asr_model, strict_multimodal, vision_model, endpoint, video_stride)

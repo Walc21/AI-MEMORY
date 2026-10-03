@@ -1,4 +1,4 @@
-# Entrada, saída, Drive e MCP — v0.4.1
+# Entrada, saída, Drive e MCP — v0.5.1
 
 Os canais se apoiam no pipeline existente: Pacote → BN1_1 → Hot Hub → protocolos/Curadoria/G_P → BN1_2 → Semantic Core. A integração transporta dados e acrescenta proveniência externa às inferências; não atribui significado durante o transporte. O MCP de memória consulta o mesmo ledger verificado que a CLI e a API `Memory`.
 
@@ -40,9 +40,9 @@ Instale pelo fluxo de plugins locais suportado pelo seu host. O pacote exige o p
 
 A skill lê o perfil da conta, busca/cria a raiz `AI MEMORY - Mimir`, depois `Entrada` e `Saída`. Ela relê os metadados de cada pasta, verifica parentes e vincula IDs observados. Se houver homônimas, não escolhe uma arbitrariamente. A vinculação também está disponível em `mimir io configure arquivo.json`, com `root`, `incoming`, `outgoing` (metadados observados do Drive) e `account_email` (perfil confirmado). Guarde esse arquivo fora do repositório.
 
-Para cada entrada, o host lê metadados antes/depois do download, copia o arquivo recebido para `io_status.staging_directory`, chama `io_ingest_file` e remove apenas seu arquivo temporário. Essa ponte requer staging compartilhado entre host e MCP; um MCP remoto sem filesystem compartilhado deve usar a API autônoma. Os downloads do plugin usam retorno de arquivo/stream; o limite de corpo MCP HTTP é 4 MiB e não é um canal para transferir grandes blobs.
+Antes de baixar, o host chama `io_begin_input(before)`: revisões já processadas são reconhecidas e outra entrada é recusada enquanto o ciclo anterior estiver aberto. Para cada entrada admitida, lê metadados antes/depois do download, copia o arquivo recebido para `io_status.staging_directory`, chama `io_ingest_file` e entrega sua saída antes de passar ao próximo arquivo. Só continua após `input_cycle.phase == CLOSED`. Pode cancelar uma reserva abandonada antes da ingestão com `io_cancel_download(input_key)`; uma entrada já admitida exige retomar a mesma revisão. Essa ponte requer staging compartilhado entre host e MCP; um MCP remoto sem filesystem compartilhado deve usar a API autônoma. Os downloads do plugin usam retorno de arquivo/stream; o limite de corpo MCP HTTP é 4 MiB e não é um canal para transferir grandes blobs.
 
-Para saídas, o host chama `io_pending`, verifica se um upload anterior já existe pelo nome/size/hash, publica `local_path` usando as ferramentas Drive e relê metadados remotos antes de `io_acknowledge`. Em caso de resultado incerto, a fila permanece pendente para reconciliação, sem afirmar que foi entregue.
+Para saídas, o host drena `io_pending` antes de outro Input, verifica se um upload anterior já existe pelo nome/size/hash e publica `local_path` usando as ferramentas Drive. Relê conta e todas as pastas imediatamente antes de cada upload e outra vez antes de `io_acknowledge`. O readback do arquivo exige `ownedByMe:true`, `shared:false`, `trashed:false`, parent, tamanho e checksums observados. O ACK inclui `folder_validation` com `account_fingerprint`, `root`, `incoming` e `outgoing`; cada pasta exige flags explícitas e localização correta. Um recibo legado `DELIVERED` ainda pendente recebe readback do seu `remote.id`, sem novo upload. Em caso de resultado incerto, a fila permanece pendente para reconciliação, sem afirmar que foi entregue.
 
 O Google precisa conceder os escopos de leitura e escrita. `ACCESS_TOKEN_SCOPE_INSUFFICIENT` é um bloqueio do provedor: reconecte o plugin nas configurações do host. Autorizar uma tarefa na conversa não altera o OAuth concedido pelo Google.
 
@@ -94,7 +94,7 @@ Para permitir episódios, gere com `--allow-write`, ou adicione essa opção ape
 | --- | --- |
 | `memory` | `memory_query`, `memory_explain`, `memory_status`, `memory_working`; recurso `mimir://working` |
 | `memory --allow-write` | Acrescenta `memory_remember` e `memory_set_working` |
-| `io` | `io_status`, `io_configure`, `io_ingest_file`, `io_receive`, `io_pending`, `io_acknowledge`, `io_export_memory`, `io_publish_query`, `io_sync_drive` |
+| `io` | `io_status`, `io_configure`, `io_begin_input`, `io_cancel_download`, `io_ingest_file`, `io_receive`, `io_pending`, `io_acknowledge`, `io_export_memory`, `io_publish_query`, `io_sync_drive` |
 
 Consultas MCP limitam `k` a 1–100, a pergunta a 8000 caracteres e `budget_chars` a 256–80000. O orçamento mede o contexto, não o JSON completo com evidências. `memory_explain` retorna a origem e `external_source` quando fornecido pela integração. A identidade da conta é registrada como fingerprint; os IDs, URLs e nomes das fontes são dados privados da memória e podem aparecer nas respostas autorizadas.
 
@@ -121,19 +121,23 @@ Para outro computador, use túnel SSH ou proxy HTTPS que preserve Host/Origin lo
 <memória>/<namespace>/
   IO/drive.json                     # conta/pastas verificadas; sem token
   IO/credentials/google-token.json  # opcional, OAuth privado
+  IO/input-cycle.json               # admissão exclusiva e fase do ciclo
   IO/staging/                       # downloads materializados pelo host/API
   IO/seen/                          # índice de revisões concluídas
-  Input_Storage/jobs/<sha256>/       # fonte, runtime e recibo de ingestão
+  Input_Storage/jobs/<sha256>/       # recibo/cycle.json; fonte/runtime até limpeza
   Output_Storage/outbox/<sha256>/    # payload.json e receipt.json
   generations/, sources/, indexes/ # memória canônica existente
 ```
 
 - `mimir.drive-config.v1`: fingerprint da conta, três IDs distintos e backend plugin/API.
 - `mimir.input-receipt.v1`: job derivado do ID/revisão/SHA-256/exportação, estado `PROCESSING`, `FAILED` ou `COMPLETE`, metadados remotos e geração/fingerprint semânticos. A proveniência está na inferência canônica e é validada com o upstream, sem alterar `source.id` ou G_P.
+- `mimir.input-cycle.v1`: chave da revisão, dono, staging e outputs obrigatórios; fases `DOWNLOADING`, `PROCESSING`, `AWAITING_DELIVERY`, `CLEANING`, `CLOSED`. O bloqueio abrange a admissão no mesmo namespace, inclusive Python/CLI/MCP.
 - `mimir.exchange.v1`: namespace, tópico, geração opcional e payload JSON. Saídas são de conteúdo imutável, com ID derivado do envelope.
-- `mimir.output-receipt.v1`: SHA-256, MD5, tamanho, ID remoto reservado quando houver, e estado `PENDING` ou `DELIVERED`. Confirmação exige o nome esperado, pasta Saída, tamanho e correspondência de todos os checksums presentes no readback.
+- `mimir.output-receipt.v1`: SHA-256, MD5, tamanho, ID remoto reservado quando houver, e estado `PENDING` ou `DELIVERED`. Confirmação exige o nome esperado, pasta Saída, tamanho, correspondência de todos os checksums presentes no readback e prova atual de conta/pastas/arquivo privados. `privacy_verified:true` distingue um ACK desta versão de um recibo legado.
 
 Publicações locais usam arquivo temporário, fsync e rename; payload publicado antes de uma interrupção pode recuperar seu recibo. Ingestões interrompidas retomam o runtime existente. Um upload API usa ID remoto pré-reservado e `appProperties.mimir_output_id`; após timeout, o próximo ciclo consulta esse ID e valida a entrega antes de repetir criação. A ponte do plugin reconcilia nome/checksum porque não controla IDs pré-reservados.
+
+Após verificar a geração canônica e todas as saídas obrigatórias, o ciclo grava `CLEANING`, remove seu runtime, sua cópia de entrada e staging rastreado, e grava `CLOSED`. Interrupções de limpeza são retomadas sem inferência/upload repetidos; recibos e canon permanecem. Uma mudança de compartilhamento observada antes do upload impede a escrita; observada depois impede ACK/limpeza. Leituras remotas não tornam alterações concorrentes do provedor atômicas. Consulte o [contrato de aceite](audit-fixes-v0.5.1.md).
 
 Limites padrão: entrada 64 MiB, saída 16 MiB e 10000 arquivos por enumeração. `IOLimits` permite ajuste explícito pela API Python. O envelope nunca é truncado. `io export-memory` exporta ledger/manifesto verificados; não é um backup completo e não inclui blobs originais, credenciais, ACL ou Working Memory. Para restauração integral, preserve o diretório privado inteiro.
 

@@ -43,9 +43,12 @@ class DeliveryDrive:
         return "reserved-output"
 
     def upload(self, job, config, path):
-        return {"id": job["remote_reserved_id"], "name": job["file_name"],
+        remote = {"id": job["remote_reserved_id"], "name": job["file_name"],
                 "parents": [config["output_folder_id"]], "size": str(job["size"]),
-                "sha256Checksum": job["sha256"], "md5Checksum": job["md5"]}
+                "sha256Checksum": job["sha256"], "md5Checksum": job["md5"],
+                "trashed": False, "ownedByMe": True, "shared": False}
+        self.rows[remote["id"]] = remote
+        return deepcopy(remote)
 
 
 class SyncRuntimeRegressions(unittest.TestCase):

@@ -1,6 +1,7 @@
 """Crash-recoverable inbox/outbox beside the canonical memory namespace."""
 
 from contextlib import contextmanager
+from contextvars import ContextVar
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,10 @@ from Transformer_Core.semantic.model import content_id, now
 from Transformer_Core.semantic.storage import read_json
 from Transformer_Core.structural.model import canonical, fingerprint
 from .model import IOError, IOLimits, account_fingerprint, export_spec, local_name, remote_id, revision, verify_bytes
+from .cycle import InputCycle
+
+
+_HELD = ContextVar("mimir_channel_locks", default=frozenset())
 
 
 class Channels:
@@ -28,6 +33,7 @@ class Channels:
         self.inputs = self.store.root / "Input_Storage/jobs"
         self.outbox = self.store.root / "Output_Storage/outbox"
         self.config_file = self.root / "drive.json"
+        self.cycle = InputCycle(self)
 
     @contextmanager
     def locked(self, write=False):
@@ -35,6 +41,11 @@ class Channels:
         self.store.authorize(write)
         for directory in (self.staging, self.inputs, self.outbox):
             ensure_directories(self.store.base, directory)
+        key = str(self.root.absolute())
+        held = _HELD.get()
+        if key in held:
+            yield
+            return
         descriptor = os.open(self.root / "channels.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             os.close(descriptor)
@@ -42,10 +53,51 @@ class Channels:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             self.store.authorize(write)
-            yield
+            token = _HELD.set(held | {key})
+            try:
+                yield
+            finally:
+                _HELD.reset(token)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
+
+    @contextmanager
+    def input_guard(self, runtime):
+        with self.locked(write=True):
+            self.cycle.guard(runtime)
+            yield
+
+    @contextmanager
+    def transfer_locked(self):
+        with self.locked(write=True):
+            descriptor = os.open(self.root / "transfer.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise IOError("Lock de transferência inválido.")
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise IOError("Outro processo já está sincronizando este namespace.") from exc
+            yield
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def private_folder(metadata, identity=None, parent=None):
+        if (not isinstance(metadata, dict) or metadata.get("mimeType") != "application/vnd.google-apps.folder"
+                or metadata.get("trashed") is not False or metadata.get("ownedByMe") is not True
+                or metadata.get("shared") is not False or identity is not None and metadata.get("id") != identity
+                or parent is not None and (not isinstance(metadata.get("parents"), list) or parent not in metadata["parents"])):
+            raise IOError("Pasta requer metadados explícitos de propriedade, privacidade e localização autorizada.")
+
+    def validate_folders(self, validation):
+        config = self.config()
+        if not isinstance(validation, dict) or validation.get("account_fingerprint") != config["account_fingerprint"]:
+            raise IOError("Confirmação requer identidade atual da conta e metadados atuais das pastas.")
+        self.private_folder(validation.get("root"), config["root_folder_id"])
+        self.private_folder(validation.get("incoming"), config["input_folder_id"], config["root_folder_id"])
+        self.private_folder(validation.get("outgoing"), config["output_folder_id"], config["root_folder_id"])
 
     def config(self):
         if not self.config_file.exists():
@@ -68,10 +120,7 @@ class Channels:
                 if not isinstance(metadata, dict) or not isinstance(metadata.get("parents", []), list) or any(not isinstance(parent, str) for parent in metadata.get("parents", [])):
                     raise IOError("Metadados de pasta requerem objeto JSON e lista de parents.")
                 remote_id(metadata.get("id"))
-                if metadata.get("mimeType") != "application/vnd.google-apps.folder" or metadata.get("trashed"):
-                    raise IOError("A configuração requer pastas reais não excluídas.")
-                if metadata.get("shared") or metadata.get("ownedByMe") is False:
-                    raise IOError("A configuração requer pastas privadas pertencentes à conta autenticada.")
+                self.private_folder(metadata)
             if root["id"] not in incoming.get("parents", []) or root["id"] not in outgoing.get("parents", []) or len({row["id"] for row in (root, incoming, outgoing)}) != 3:
                 raise IOError("Entrada e saída devem ser pastas distintas dentro da raiz verificada.")
             value = {"schema": "mimir.drive-config.v1", "root_folder_id": root["id"],
@@ -118,6 +167,8 @@ class Channels:
                 if not settings.get("force"):
                     self._publish_input(receipt, before)
                     return receipt
+            self.recover_cycle()
+            self.cycle.claim(self._seen_key(before), identity, path)
             metadata = {"provider": "google-drive", "file_id": before["id"], "revision": first,
                 "name": before["name"], "mime_type": before["mimeType"], "export_mime_type": export_mime,
                 "modified_time": before["modifiedTime"], "web_url": before.get("webViewLink"),
@@ -164,8 +215,71 @@ class Channels:
     def _publish_input(self, receipt, metadata):
         seen = self.root / "seen"
         ensure_directories(self.store.base, seen)
-        write_atomic(seen / (self._seen_key(metadata) + ".json"), {"input_job_id": receipt["id"]})
-        self._enqueue_unlocked(receipt, "ingestion", receipt["semantic_generation"])
+        source = receipt["source"]
+        key = self._seen_key(metadata) if metadata is not None else fingerprint({"file_id": source["file_id"], "revision": source["revision"], "export": source["export_mime_type"]})
+        write_atomic(seen / (key + ".json"), {"input_job_id": receipt["id"]})
+        output = self._enqueue_unlocked(receipt, "ingestion", receipt["semantic_generation"])
+        self.cycle.link(receipt, output)
+
+    def claim_download(self, metadata):
+        with self.locked(write=True):
+            self._input_metadata(metadata)
+            self.recover_cycle()
+            return self.cycle.claim(self._seen_key(metadata))
+
+    def begin_input(self, metadata):
+        with self.locked(write=True):
+            self.recover_cycle()
+            completed = self.processed(metadata)
+            if completed:
+                return {"processed": completed, "input_cycle": self.cycle.load()}
+            return {"processed": None, "input_cycle": self.claim_download(metadata)}
+
+    def cancel_download(self, input_key):
+        with self.locked(write=True):
+            current = self.cycle.load()
+            if not current or current["input_key"] != input_key or current["input_job_id"] is not None:
+                raise IOError("Só é possível cancelar o download ativo antes de admitir bytes para processamento.")
+            self.cycle.release_download(input_key)
+            return self.cycle.load()
+
+    def release_download(self, metadata):
+        with self.locked(write=True):
+            self.cycle.release_download(self._seen_key(metadata))
+
+    def recover_cycle(self):
+        """Resume cleanup and adopt retained v0.5.0 jobs without re-inference."""
+        with self.locked(write=True):
+            current = self.cycle.load()
+            if current and current["phase"] != "CLOSED":
+                identity = current["input_job_id"]
+                if identity:
+                    path = self.inputs / identity / "receipt.json"
+                    if path.exists():
+                        receipt = read_json(path)
+                        if receipt.get("status") == "COMPLETE":
+                            self._verify_input(receipt, identity)
+                            output = self._enqueue_unlocked(receipt, "ingestion", receipt["semantic_generation"])
+                            self.cycle.link(receipt, output)
+                            self.cycle.finish()
+                return self.cycle.load()
+            for folder in sorted(self.inputs.iterdir()):
+                path = folder / "receipt.json"
+                if folder.is_symlink() or not re.fullmatch(r"[0-9a-f]{64}", folder.name):
+                    raise IOError("Entrada inesperada no armazenamento de I/O.")
+                if not path.exists() or not ((folder / "runtime").exists() or (folder / "source").exists()):
+                    continue
+                receipt = read_json(path)
+                if receipt.get("status") != "COMPLETE":
+                    continue
+                self._verify_input(receipt, folder.name)
+                source = receipt["source"]
+                key = fingerprint({"file_id": source["file_id"], "revision": source["revision"], "export": source["export_mime_type"]})
+                self.cycle.claim(key, folder.name)
+                self._publish_input(receipt, None)
+                if not self.cycle.finish():
+                    break
+            return self.cycle.load()
 
     @staticmethod
     def _seen_key(metadata):
@@ -210,6 +324,16 @@ class Channels:
         if not isinstance(data, bytes) or len(data) > self.limits.max_file_bytes:
             raise IOError("Conteúdo de staging inválido ou excessivo.")
         with self.locked(write=True):
+            current = self.cycle.load()
+            if current and current["phase"] != "CLOSED" and current["input_job_id"]:
+                receipt_path = self.inputs / current["input_job_id"] / "receipt.json"
+                # A crash can occur after admission but before the first receipt.
+                # ingest_file still checks both the revision key and byte-derived
+                # job ID before admitting a retry or publishing any inference.
+                if receipt_path.exists() or receipt_path.is_symlink():
+                    receipt = read_json(receipt_path)
+                    if hashlib.sha256(data).hexdigest() != receipt["source"]["sha256"]:
+                        raise IOError("Input ocupado: staging só pode retomar os bytes do ciclo ativo.")
             descriptor, path = tempfile.mkstemp(prefix="incoming-", dir=self.staging)
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(data)
@@ -244,7 +368,8 @@ class Channels:
         return {"schema": "mimir.output-receipt.v1", "id": identity, "status": "PENDING", "topic": message["topic"],
                "semantic_generation": message["semantic_generation"], "file_name": f"mimir-{message['topic']}-{identity}.json",
                "sha256": hashlib.sha256(data).hexdigest(), "md5": hashlib.md5(data).hexdigest(),
-               "size": len(data), "created_at": now(), "remote_reserved_id": None, "remote": None}
+               "size": len(data), "created_at": now(), "remote_reserved_id": None, "remote": None,
+               "privacy_verified": False}
 
     def _load_output(self, folder):
         if folder.is_symlink() or not folder.is_dir() or not re.fullmatch(r"[0-9a-f]{64}", folder.name):
@@ -301,7 +426,7 @@ class Channels:
                 if job is None:
                     continue
                 path = self._check_output(job)
-                if job["status"] != "DELIVERED":
+                if job["status"] != "DELIVERED" or job.get("privacy_verified") is not True:
                     jobs.append({**job, "local_path": str(path)})
                 if len(jobs) == limit:
                     break
@@ -325,6 +450,9 @@ class Channels:
             folder = self._job_folder(identity)
             job = read_json(folder / "receipt.json")
             self._check_output(job)
+            self.validate_folders(metadata.get("folder_validation"))
+            if metadata.get("ownedByMe") is not True or metadata.get("shared") is not False or metadata.get("trashed") is not False:
+                raise IOError("Saída remota requer propriedade e privacidade explicitamente confirmadas.")
             remote_id(metadata["id"])
             if metadata.get("trashed") or config["output_folder_id"] not in metadata.get("parents", []) or metadata.get("name") != job["file_name"] or int(metadata.get("size", -1)) != job["size"]:
                 raise IOError("Recibo remoto não corresponde à saída/pasta autorizada.")
@@ -336,10 +464,14 @@ class Channels:
             if job["status"] == "DELIVERED":
                 if metadata["id"] != job["remote"]["id"]:
                     raise IOError("Saída já confirmada em outro arquivo remoto.")
-                return job
+                if job.get("privacy_verified") is True:
+                    self.cycle.finish()
+                    return job
             job.update(status="DELIVERED", remote={key: metadata.get(key) for key in
-                ("id", "name", "parents", "size", "md5Checksum", "sha256Checksum", "webViewLink")}, delivered_at=now())
+                ("id", "name", "parents", "size", "md5Checksum", "sha256Checksum", "webViewLink", "ownedByMe", "shared", "trashed")},
+                delivered_at=job.get("delivered_at") or now(), privacy_verified=True)
             write_atomic(folder / "receipt.json", job)
+            self.cycle.finish()
             return job
 
     def status(self):
@@ -355,7 +487,8 @@ class Channels:
                         continue
                     counts[row["status"]] = counts.get(row["status"], 0) + 1
             return {"schema": "mimir.io-status.v1", "configured": config is not None,
-                    "drive": config, "inputs": inputs, "outputs": outputs, "staging_directory": str(self.staging)}
+                    "drive": config, "inputs": inputs, "outputs": outputs, "staging_directory": str(self.staging),
+                    "input_cycle": self.cycle.load()}
 
     def export_memory(self):
         with self.store.locked():

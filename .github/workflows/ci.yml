@@ -30,6 +30,8 @@ jobs:
           python -S -m unittest discover -s tests -p 'test_pipeline_runtime_regressions.py' -v
           python -S -m unittest discover -s tests -p 'test_semantic_runtime_regressions.py' -v
           python -S -m unittest discover -s tests -p 'test_answer_grounding.py' -v
+          python -S -m unittest discover -s tests -p 'test_audit_semantic_contracts.py' -v
+          python -S -m unittest discover -s tests -p 'test_audit_input_cycles.py' -v
   tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -50,11 +52,15 @@ jobs:
       - name: Run regressions
         run: python -m unittest discover -s tests -v
       - name: Verify installed CLI outside repository
+        env:
+          SOURCE_CHECKOUT: ${{ github.workspace }}
         run: |
           task_dir=$(mktemp -d)
           cd "$task_dir"
           mimir episode 'Alice works at Acme.'
           mimir query 'Where Alice works?' --text
           mimir verify
+          release_version=$(python -c 'from mimir_version import __version__; print(__version__)')
+          python "$SOURCE_CHECKOUT/tools/verify_release.py" --expected-version "$release_version"
       - name: Run offline semantic evaluation
         run: mimir eval

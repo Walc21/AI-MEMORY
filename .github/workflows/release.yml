@@ -83,6 +83,7 @@ jobs:
           assert absent['abstained'] and not absent['claims'] and not absent['answer_evidence']
           PY
           mimir verify
+          python "$GITHUB_WORKSPACE/tools/verify_release.py" --expected-version '${{ steps.version.outputs.version }}'
       - name: Publish tag and release for the exact tested commit
         if: steps.version.outputs.publish == 'true'
         env:
@@ -101,4 +102,4 @@ jobs:
             git push origin "refs/tags/$tag"
           fi
           gh release create "$tag" dist/*.whl dist/*.zip dist/SHA256SUMS.txt --verify-tag \
-            --title "$tag — grounded concise memory" --notes-file "docs/releases/$tag.md"
+            --title "$tag — audited memory and input cycles" --notes-file "docs/releases/$tag.md"

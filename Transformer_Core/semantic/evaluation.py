@@ -19,8 +19,8 @@ FIXTURE = {
         ["maria", "born_in", "1992"], ["maria", "born_in", "1993"], ["bob", "works_at", "contoso"],
         ["dan", "works_at", "oldco"], ["dan", "works_at", "newco"]],
     "queries": [
-        {"question": "Onde Alice trabalha?", "expected": ["Alice works at Acme"], "category": "retrieval"},
-        {"question": "Onde fica a empresa de Alice?", "expected": ["Alice works at Acme", "Acme lives in Paris"], "category": "multi_hop"},
+        {"question": "Onde Alice trabalha?", "at": "2020", "expected": ["Alice works at Acme"], "category": "retrieval"},
+        {"question": "Onde fica a empresa de Alice?", "at": "2020", "expected": ["Alice works at Acme", "Acme lives in Paris"], "category": "multi_hop"},
         {"question": "Quando Maria nasceu?", "expected": ["1992", "1993"], "conflict": True, "category": "contradiction"},
         {"question": "Onde Bob trabalha?", "at": "2020", "expected": ["Contoso"], "category": "temporal"},
         {"question": "Where Dan works?", "expected": ["NewCo"], "excluded": ["OldCo"], "category": "update"},

@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml/badge.svg)](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
-[![Release](https://img.shields.io/badge/release-v0.5.0-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.5.0)
+[![Release](https://img.shields.io/badge/release-v0.5.1-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.5.1)
 
 **Memória local auditável: bytes → estrutura → evidências → afirmações temporais → consulta com fontes.**
 
-A **v0.5.0 corrige a passagem indevida de um resultado de busca para uma resposta factual**. A consulta exige suporte para a informação solicitada, conserva os vínculos entre registros e campos em JSON/tabelas e devolve trechos concisos com fontes. Uma pergunta sobre a cor de Alice se abstém quando a memória contém apenas seu emprego. Negação, histórico e limites de contexto são verificados antes da resposta. A mesma regra vale para Python, CLI, MCP e respostas enfileiradas no Drive.
+A **v0.5.1 corrige os quatro problemas da auditoria da v0.5.0**: identidade de pessoas/organizações preserva a ordem completa; campos JSON pertencem ao registro correto; fatos históricos exigem cobertura da data consultada; e cada namespace admite um Input até concluir entrega e limpeza verificadas. A privacidade da conta/pastas é relida antes de publicar e confirmar saídas. As mesmas regras de resposta valem para Python, CLI, MCP e consultas enfileiradas no Drive.
 
-O pipeline original continua: preservação por arquivo no Hot Hub, chunks de 1.024 bytes, estrutura G_P/BN1_2 e interpretação semântica separada. A decisão de bytes/chunks de 29/09 substituiu a organização inicial por extensão; esta release não restaura Sorter/IDD. Consulte o [contrato de resposta e aceite](docs/grounded-memory-v0.5.0.md), o [manual](docs/reference/semantic-core-manual.pdf), o [guia de Drive/MCP](docs/drive-mcp.md) e a [auditoria anterior](docs/runtime-audit-v0.4.1.md).
+O pipeline original continua: preservação por arquivo no Hot Hub, chunks de 1.024 bytes, estrutura G_P/BN1_2 e interpretação semântica separada. A decisão de bytes/chunks de 29/09 substituiu a organização inicial por extensão; esta release não restaura Sorter/IDD. Consulte as [causas, correções e critérios de aceite](docs/audit-fixes-v0.5.1.md), o [contrato de resposta](docs/grounded-memory-v0.5.0.md), o [manual](docs/reference/semantic-core-manual.pdf), o [guia de Drive/MCP](docs/drive-mcp.md) e a [auditoria anterior](docs/runtime-audit-v0.4.1.md).
 
 ```mermaid
 flowchart LR
@@ -93,7 +93,7 @@ mimir drive sync
 mimir drive sync --watch --interval 30
 ```
 
-`bootstrap` cria/reutiliza as pastas privadas e vincula a conta; uma configuração feita pela ponte pode ser utilizada pela API se a conta for a mesma. `sync` processa os arquivos diretamente na Entrada, preserva revisões anteriores e publica a outbox na Saída. Não apaga os originais. `io status` mostra a situação real; `PENDING` é uma saída local, `DELIVERED` é uma publicação remota verificada. Use `mimir query 'PERGUNTA' --publish` ou `io_publish_query` para enfileirar uma resposta citada. Instale os leitores opcionais para os formatos desejados. OCR, modelos locais e assinatura também são aceitos em `drive sync`.
+`bootstrap` cria/reutiliza as pastas privadas e vincula a conta; uma configuração feita pela ponte pode ser utilizada pela API se a conta for a mesma. `sync` processa os arquivos diretamente na Entrada, preserva revisões anteriores e publica a outbox na Saída. Após o ACK verificado, remove apenas o runtime, a cópia de entrada e o staging do ciclo, preservando o canon e os originais remotos. Um novo Input espera o anterior chegar a `CLOSED`. `io status` mostra a situação real; `PENDING` é uma saída local, `DELIVERED` é uma publicação remota verificada. Use `mimir query 'PERGUNTA' --publish` ou `io_publish_query` para enfileirar uma resposta citada. Instale os leitores opcionais para os formatos desejados. OCR, modelos locais e assinatura também são aceitos em `drive sync`.
 
 Para HTTP autenticado, empacotamento do plugin, exportação de memória e operação contínua, siga o [guia completo](docs/drive-mcp.md).
 

@@ -51,7 +51,7 @@ class SemanticCoreTests(unittest.TestCase):
 
     def test_full_pipeline_source_explanation_and_output(self):
         runtime, generation = self.ingest()
-        result = self.memory.query("Onde João trabalha?", save=True)
+        result = self.memory.query("Onde João trabalha?", valid_at="2023", save=True)
         self.assertFalse(result["abstained"])
         self.assertEqual(result["claims"][0]["object"], "openai")
         explanation = self.memory.explain(result["claims"][0]["assertion_id"])
@@ -204,7 +204,7 @@ class SemanticCoreTests(unittest.TestCase):
 
     def test_multihop_expands_through_grounded_entity_graph(self):
         self.ingest("Alice works at Acme in 2020.\nAcme lives in Paris.\n")
-        result = self.memory.query("Onde fica a empresa de Alice?")
+        result = self.memory.query("Onde fica a empresa de Alice?", valid_at="2020")
         self.assertEqual({claim["object"] for claim in result["claims"]}, {"acme", "paris"})
         self.assertTrue(any("graph" in hit["channels"] for hit in result["hits"]))
 
