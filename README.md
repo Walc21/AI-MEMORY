@@ -1,5 +1,7 @@
 # AI MEMORY / Mimir
 
+### Auditable local memory for AI systems: turns files into evidence-backed temporal claims and answers queries with sources. CLI + MCP servers, hybrid search, fully offline (Python).
+
 [![CI](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml/badge.svg)](https://github.com/Walc21/AI-MEMORY/actions/workflows/ci.yml)
 ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 [![Release](https://img.shields.io/badge/release-v0.5.1-purple)](https://github.com/Walc21/AI-MEMORY/releases/tag/v0.5.1)
